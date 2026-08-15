@@ -372,8 +372,9 @@ fn highlighted_search_match_copies_after_in_flight_repeat() {
         &request.id,
         Ok(copy_search_result(matches.clone(), Some(0))),
     );
+    // fork: next-match is `k`, not `n`. See FORK.md patch 0002.
     let repeat = state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
-        KeyCode::Char('n'),
+        KeyCode::Char('k'),
         KeyModifiers::empty(),
     ))]);
     let [ClientShellAction::Endpoint { request, .. }] = &repeat.actions[..] else {

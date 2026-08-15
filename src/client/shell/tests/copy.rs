@@ -1,4 +1,5 @@
 use super::*;
+use crate::client::shell::copy_mode::FORK_JUMP;
 
 #[test]
 fn pasted_help_and_copy_queries_normalize_single_line_text() {
@@ -537,7 +538,8 @@ fn keyboard_selections_survive_output_and_copy_live_ranges() {
         state.compose(106, 20).expect("composed frame");
         state.handle_input_bytes(b"\x02[");
         state.handle_input_bytes(selection_key);
-        state.handle_input_bytes(b"k");
+        // fork: cursor-up is `i`, not `k`. See FORK.md patch 0002.
+        state.handle_input_bytes(b"i");
         let range = state
             .selection
             .as_ref()
@@ -627,7 +629,8 @@ fn keyboard_selection_does_not_return_after_resize_or_screen_switch() {
         state.set_pane_surface(pane_surface.clone());
         state.compose(106, 20).expect("composed frame");
         state.handle_input_bytes(b"\x02[");
-        state.handle_input_bytes(b"vk");
+        // fork: cursor-up is `i`, not `k`. See FORK.md patch 0002.
+        state.handle_input_bytes(b"vi");
         assert!(state.selection.is_some());
         pane_surface.surface_revision += 1;
         pane_surface.panes[0].content_revision += 2;
@@ -667,8 +670,9 @@ fn keyboard_copy_mode_content_motion_is_endpoint_backed_and_stale_safe() {
     );
     let origin = state.copy_mode.as_ref().expect("copy mode").cursor;
 
+    // fork: next-word is `f`, not `w`. See FORK.md patch 0002.
     let motion = state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
-        KeyCode::Char('w'),
+        KeyCode::Char('f'),
         KeyModifiers::empty(),
     ))]);
     let [ClientShellAction::Endpoint { request, .. }] = &motion.actions[..] else {
@@ -848,8 +852,9 @@ fn copy_search_owns_prompt_repeat_highlights_selection_and_restore() {
         KeyCode::Char('v'),
         KeyModifiers::empty(),
     ))]);
+    // fork: next-match is `k`, not `n`. See FORK.md patch 0002.
     let repeat = state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
-        KeyCode::Char('n'),
+        KeyCode::Char('k'),
         KeyModifiers::empty(),
     ))]);
     let [ClientShellAction::Endpoint { request, .. }] = &repeat.actions[..] else {
@@ -886,8 +891,9 @@ fn copy_search_owns_prompt_repeat_highlights_selection_and_restore() {
         .as_ref()
         .is_some_and(crate::selection::Selection::is_visible));
 
+    // fork: previous-match is `K`, not `N`. See FORK.md patch 0002.
     let reverse = state.handle_raw_events(vec![RawInputEvent::Key(
-        crate::input::TerminalKey::new(KeyCode::Char('N'), KeyModifiers::SHIFT),
+        crate::input::TerminalKey::new(KeyCode::Char('K'), KeyModifiers::SHIFT),
     )]);
     let [ClientShellAction::Endpoint { request, .. }] = &reverse.actions[..] else {
         panic!("reverse search should use endpoint search");
@@ -2239,7 +2245,7 @@ fn copy_mode_repeat_during_projection_gap_stays_active() {
             state.handle_input_bytes(b"V");
         }
         state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
-            KeyCode::Char('k'),
+            KeyCode::Char('i'), // fork: upstream k
             KeyModifiers::empty(),
         ))]);
 
@@ -2267,7 +2273,7 @@ fn copy_mode_repeat_during_projection_gap_stays_active() {
             crossterm::event::KeyEventKind::Repeat
         };
         let moved = state.handle_raw_events(vec![RawInputEvent::Key(
-            crate::input::TerminalKey::new(KeyCode::Char('k'), KeyModifiers::empty())
+            crate::input::TerminalKey::new(KeyCode::Char('i'), KeyModifiers::empty()) // fork: upstream k
                 .with_kind(kind),
         )]);
         assert!(moved.actions.iter().any(|action| matches!(
@@ -2307,4 +2313,204 @@ fn copy_mode_repeat_during_projection_gap_stays_active() {
             Some(19)
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// fork: colemak copy-mode keymap. See FORK.md patches 0001 and 0002.
+// ---------------------------------------------------------------------------
+
+/// fork: `surface()` is a 4x2 pane, too small for the jump-5 motions to move
+/// without clamping. Same shape, just wide enough to observe a 5-cell jump.
+fn fork_wide_surface() -> PaneSurfaceFrame {
+    let buffer = Buffer::with_lines(["alphabetagamma", "second linexxx"]);
+    let mut pane_surface = surface();
+    pane_surface.frame = FrameData::from_ratatui_buffer_with_hyperlinks(
+        &buffer,
+        Some(crate::protocol::CursorState {
+            x: 0,
+            y: 0,
+            visible: true,
+            shape: 2,
+        }),
+        &[],
+    );
+    let rect = SurfaceRect {
+        x: 0,
+        y: 0,
+        width: 14,
+        height: 2,
+    };
+    pane_surface.panes[0].rect = rect;
+    pane_surface.panes[0].inner_rect = rect;
+    pane_surface.panes[0].scroll = Some(crate::protocol::PaneSurfaceScrollMetrics {
+        offset_from_bottom: 0,
+        max_offset_from_bottom: 0,
+        viewport_rows: 2,
+    });
+    pane_surface
+}
+
+/// fork: client shell parked in copy mode on `fork_wide_surface`, cursor at 0,0.
+fn fork_copy_mode_state() -> ClientShellState {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(fork_wide_surface());
+    state.compose(106, 20).expect("composed frame");
+    state.handle_input_bytes(b"\x02[");
+    assert_eq!(state.mode, ClientShellMode::Copy);
+    state
+}
+
+fn fork_cursor(state: &ClientShellState) -> (u32, u32) {
+    let cursor = state.copy_mode.as_ref().expect("copy mode").cursor;
+    (cursor.row, u32::from(cursor.col))
+}
+
+// fork: see FORK.md patch 0002
+#[test]
+fn copy_mode_colemak_neio_replace_hjkl_as_the_arrow_cluster() {
+    for (key, expected) in [
+        (b"o", (0, 1)),
+        (b"e", (1, 0)),
+        (b"n", (0, 0)),
+        (b"i", (0, 0)),
+    ] {
+        let mut state = fork_copy_mode_state();
+        state.handle_input_bytes(key);
+        assert_eq!(fork_cursor(&state), expected, "colemak {:?}", key);
+    }
+
+    // The fork remaps onto upstream's arms rather than editing them, so the
+    // displaced keys keep working. `k` is the exception: it is claimed for
+    // search-repeat, so it must no longer move the cursor.
+    for (key, expected) in [(b"l", (0, 1)), (b"j", (1, 0)), (b"h", (0, 0))] {
+        let mut state = fork_copy_mode_state();
+        state.handle_input_bytes(key);
+        assert_eq!(
+            fork_cursor(&state),
+            expected,
+            "upstream {:?} must still work",
+            key
+        );
+    }
+
+    let mut state = fork_copy_mode_state();
+    state.handle_input_bytes(b"e");
+    assert_eq!(fork_cursor(&state), (1, 0));
+    state.handle_input_bytes(b"k");
+    assert_eq!(
+        fork_cursor(&state),
+        (1, 0),
+        "k is search-repeat now, not cursor-up"
+    );
+}
+
+// fork: see FORK.md patch 0002
+#[test]
+fn copy_mode_colemak_shift_o_jumps_fork_jump_cells() {
+    let mut state = fork_copy_mode_state();
+
+    state.handle_input_bytes(b"O");
+
+    assert_eq!(fork_cursor(&state), (0, FORK_JUMP as u32));
+}
+
+// fork: see FORK.md patch 0002
+#[test]
+fn copy_mode_colemak_q_and_p_are_line_edges_not_exit() {
+    let mut state = fork_copy_mode_state();
+    state.handle_input_bytes(b"oo");
+    assert_eq!(fork_cursor(&state), (0, 2));
+
+    state.handle_input_bytes(b"q");
+    assert_eq!(fork_cursor(&state), (0, 0));
+    assert_eq!(state.mode, ClientShellMode::Copy, "q must not exit");
+
+    // `p` is line-end, which upstream serves from the endpoint, not locally.
+    let end = state.handle_input_bytes(b"p");
+    assert!(end.actions.iter().any(|action| matches!(
+        action,
+        ClientShellAction::Endpoint { request, .. }
+            if matches!(&request.method, crate::api::schema::Method::PaneCopyMotion(params)
+                if params.motion == crate::api::schema::PaneCopyMotion::LineEnd)
+    )));
+}
+
+// fork: see FORK.md patch 0002
+#[test]
+fn copy_mode_colemak_word_keys_remap_and_shifted_ones_queue_fork_jump_motions() {
+    // `f` is next-word, borrowing upstream's `w`.
+    let mut state = fork_copy_mode_state();
+    let single = state.handle_input_bytes(b"f");
+    assert!(single.actions.iter().any(|action| matches!(
+        action,
+        ClientShellAction::Endpoint { request, .. }
+            if matches!(&request.method, crate::api::schema::Method::PaneCopyMotion(params)
+                if params.motion == crate::api::schema::PaneCopyMotion::NextWordStart)
+    )));
+    assert!(
+        state.copy_operation_queue.is_empty(),
+        "an unshifted motion must not queue repeats"
+    );
+
+    // `F` is the same motion five times. Word motions are endpoint-backed now,
+    // so the repeat dispatches one request and queues the remaining four.
+    let mut state = fork_copy_mode_state();
+    let repeated = state.handle_input_bytes(b"F");
+    assert_eq!(
+        repeated
+            .actions
+            .iter()
+            .filter(|action| matches!(
+                action,
+                ClientShellAction::Endpoint { request, .. }
+                    if matches!(&request.method, crate::api::schema::Method::PaneCopyMotion(params)
+                        if params.motion == crate::api::schema::PaneCopyMotion::NextWordStart)
+            ))
+            .count(),
+        1,
+        "only the head of the repeat may be in flight"
+    );
+    assert_eq!(state.copy_operation_queue.len(), FORK_JUMP - 1);
+}
+
+// fork: see FORK.md patch 0002
+#[test]
+fn copy_mode_colemak_k_repeats_search_and_bang_opens_it() {
+    let mut state = fork_copy_mode_state();
+
+    state.handle_input_bytes(b"!");
+
+    assert!(
+        state
+            .copy_mode
+            .as_ref()
+            .expect("copy mode")
+            .search_prompt
+            .is_some(),
+        "! must open the forward search prompt"
+    );
+}
+
+// fork: see FORK.md patch 0001
+#[test]
+fn copy_mode_ctrl_c_exits_without_copying() {
+    let mut state = fork_copy_mode_state();
+    state.handle_input_bytes(b"v");
+    state.handle_input_bytes(b"o");
+    assert!(state.selection.is_some());
+
+    let exit = state.handle_input_bytes(&[0x03]);
+
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+    assert!(state.copy_mode.is_none());
+    assert!(state.selection.is_none());
+    assert!(
+        !exit.actions.iter().any(|action| matches!(
+            action,
+            ClientShellAction::Endpoint { request, .. }
+                if matches!(&request.method, crate::api::schema::Method::PaneSelectionRead(_))
+        )),
+        "ctrl+c must not copy the selection"
+    );
 }
