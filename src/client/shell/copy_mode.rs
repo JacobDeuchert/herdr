@@ -1,6 +1,9 @@
 use super::*;
 use crossterm::event::{KeyCode, KeyModifiers};
 
+/// fork: how far the shifted colemak motions jump. See FORK.md patch 0002.
+pub(super) const FORK_JUMP: usize = 5;
+
 impl ClientShellState {
     pub(super) fn reset_copy_pipeline(&mut self) {
         self.copy_session_generation = self.copy_session_generation.saturating_add(1);
@@ -180,6 +183,13 @@ impl ClientShellState {
         }
 
         match (key.code, key.modifiers) {
+            // fork: ctrl+c leaves copy mode without copying. Copy mode consumes
+            // every key, so this never reaches the pane as SIGINT.
+            (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.exit_copy_mode(false, outcome);
+                outcome.repaint = true;
+                return;
+            }
             (KeyCode::Char('b'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.move_copy_page(-1, false, outcome);
                 return;
@@ -201,6 +211,41 @@ impl ClientShellState {
 
         let Some(command) = crate::copy_mode::copy_mode_command_char(key.clone()) else {
             return;
+        };
+        // fork: colemak copy-mode keymap. See FORK.md patch 0002.
+        let command = match command {
+            // Repeat-5 motions have no upstream equivalent, so they run here
+            // instead of being remapped into the dispatch below.
+            'N' => return self.fork_repeat(outcome, |s, out| s.move_copy_cursor(0, -1, out)),
+            'E' => return self.fork_repeat(outcome, |s, out| s.move_copy_cursor(1, 0, out)),
+            'I' => return self.fork_repeat(outcome, |s, out| s.move_copy_cursor(-1, 0, out)),
+            'O' => return self.fork_repeat(outcome, |s, out| s.move_copy_cursor(0, 1, out)),
+            'W' => {
+                return self.fork_repeat(outcome, |s, out| {
+                    s.request_copy_motion(
+                        crate::api::schema::PaneCopyMotion::PreviousWordStart,
+                        out,
+                    )
+                })
+            }
+            'F' => {
+                return self.fork_repeat(outcome, |s, out| {
+                    s.request_copy_motion(crate::api::schema::PaneCopyMotion::NextWordStart, out)
+                })
+            }
+            // Pure remaps, dispatched by upstream's match below.
+            'n' => 'h',
+            'e' => 'j',
+            'i' => 'k',
+            'o' => 'l',
+            'q' => '0',
+            'p' => '$',
+            'w' => 'b',
+            'f' => 'w',
+            '!' => '/',
+            'k' => 'n',
+            'K' => 'N',
+            other => other,
         };
         match command {
             'q' => self.exit_copy_mode(false, outcome),
@@ -258,6 +303,18 @@ impl ClientShellState {
                 self.request_copy_motion(crate::api::schema::PaneCopyMotion::NextParagraph, outcome)
             }
             _ => return,
+        }
+        outcome.repaint = true;
+    }
+
+    /// fork: run a copy-mode motion `FORK_JUMP` times. See FORK.md patch 0002.
+    fn fork_repeat(
+        &mut self,
+        outcome: &mut ClientShellInput,
+        mut motion: impl FnMut(&mut Self, &mut ClientShellInput),
+    ) {
+        for _ in 0..FORK_JUMP {
+            motion(self, outcome);
         }
         outcome.repaint = true;
     }
