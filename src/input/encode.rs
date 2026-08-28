@@ -570,6 +570,9 @@ fn encode_f_key(n: u8) -> Vec<u8> {
         10 => vec![27, 91, 50, 49, 126],
         11 => vec![27, 91, 50, 51, 126],
         12 => vec![27, 91, 50, 52, 126],
+        13..=24 => {
+            encode_modified_special(KeyCode::F(n - 12), KeyModifiers::SHIFT).unwrap_or_default()
+        }
         _ => vec![],
     }
 }
@@ -730,6 +733,19 @@ mod tests {
     fn legacy_shift_f5() {
         let key = KeyEvent::new(KeyCode::F(5), KeyModifiers::SHIFT);
         assert_eq!(encode_key(key, KeyboardProtocol::Legacy), b"\x1b[15;2~");
+    }
+
+    #[test]
+    fn legacy_f13_to_f24_use_shifted_function_key_sequences() {
+        let cases = [
+            (KeyCode::F(13), b"\x1b[1;2P".as_slice()),
+            (KeyCode::F(24), b"\x1b[24;2~".as_slice()),
+        ];
+
+        for (code, expected) in cases {
+            let key = KeyEvent::new(code, KeyModifiers::empty());
+            assert_eq!(encode_key(key, KeyboardProtocol::Legacy), expected);
+        }
     }
 
     #[test]

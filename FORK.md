@@ -168,6 +168,35 @@ cargo nextest run --locked copy_mode_colemak
 
 ---
 
+## 0003 encode F13-F24 for child terminals
+
+status: active
+
+upstream base: `9e6c2b4e` (post `v0.8.0`)
+
+local files:
+
+- `src/input/encode.rs`
+
+anchor: `encode_f_key`, after the existing `F12` arm.
+
+reason: Herdr receives extended function keys from crossterm, but its child
+terminal encoder only handles `F1` through `F12`. `F13` therefore produces no
+PTY input. Encode `F13` through `F24` using xterm's standard shifted `F1`
+through `F12` sequences.
+
+conflict risk: low. One additive match arm and a focused encoder test.
+
+remove when: upstream's function-key encoder supports `F13` through `F24`.
+
+verification:
+
+```sh
+cargo test --locked legacy_f13_to_f24_use_shifted_function_key_sequences
+```
+
+---
+
 ## Not patched, deliberately
 
 Things the tmux config used to do that this fork does *not* try to restore:
