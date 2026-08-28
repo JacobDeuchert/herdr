@@ -109,6 +109,15 @@ pub(super) fn configure_key_encoder(
 pub(super) fn legacy_shell_key(key: crate::input::TerminalKey) -> crate::input::TerminalKey {
     use crossterm::event::{KeyCode, KeyModifiers};
 
+    // fork: libghostty sends F13-F24 as rxvt-style `CSI 25~`.., but the pane's
+    // xterm-ghostty terminfo declares kf13-kf24 as Shift+F1-F12, so apps
+    // reading terminfo never see F13. Send what terminfo promises.
+    if let (KeyCode::F(n @ 13..=24), true) = (key.code, key.modifiers.is_empty()) {
+        return crate::input::TerminalKey::new(KeyCode::F(n - 12), KeyModifiers::SHIFT)
+            .with_kind(key.kind)
+            .with_repeat_count(key.repeat_count);
+    }
+
     let alt = key.modifiers & KeyModifiers::ALT;
     let chord = key.modifiers - KeyModifiers::ALT;
     let classic = match (key.code, chord) {

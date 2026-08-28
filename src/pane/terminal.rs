@@ -5074,6 +5074,20 @@ mod tests {
         }
     }
 
+    // fork: patch 0003, see FORK.md.
+    #[test]
+    fn legacy_f13_to_f24_use_shifted_function_key_sequences() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        for (code, expected) in [
+            (KeyCode::F(13), &b"\x1b[1;2P"[..]),
+            (KeyCode::F(24), b"\x1b[24;2~"),
+        ] {
+            let key = crate::input::TerminalKey::new(code, KeyModifiers::empty());
+            assert_eq!(test_encode_key_for_app(b"", key), expected, "{code:?}");
+        }
+    }
+
     #[test]
     fn ctrl_on_a_russian_layout_interrupts_a_plain_shell() {
         // Lab capture: kitty reports Ctrl+\u{441} as `CSI 1089::99;5u`; kitty
