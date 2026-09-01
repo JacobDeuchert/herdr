@@ -41,12 +41,12 @@ just check
 cargo build --release
 ```
 
-The build needs Zig 0.15.2 for the vendored `libghostty-vt`. Fork builds do not
+The build needs Zig 0.16.0 for the vendored `libghostty-vt`. Fork builds do not
 receive `herdr update`; reinstall the binary yourself.
 
 ## Why these are patches and not config
 
-Upstream herdr 0.8.0 makes only the key that *enters* copy mode configurable
+Upstream herdr 0.9.0 makes only the key that *enters* copy mode configurable
 (`keys.copy_mode`). Every key *inside* copy mode is hardcoded. Making them
 configurable is an open upstream request with no implementation:
 https://github.com/herdrdev/herdr/discussions/587
@@ -60,13 +60,14 @@ become deletable in favor of config in `~/.config/herdr/config.toml`.
 
 status: active
 
-upstream base: `9e6c2b4e` (post `v0.8.0`)
+upstream base: `18061191` (post `v0.9.0`)
 
 local files:
 
-- `src/app/input/copy_mode.rs`
+- `src/client/shell/copy_mode.rs`
+- `src/client/shell/tests/copy.rs`
 
-anchor: `AppState::handle_copy_mode_key`, the `match (key.code, key.modifiers)`
+anchor: `ClientShellState::route_copy_mode_key`, the `match (key.code, key.modifiers)`
 block that handles the `ctrl+b` / `ctrl+f` / `ctrl+u` / `ctrl+d` page motions.
 
 reason: The Colemak remap in patch 0002 moves `q` to start-of-line, which
@@ -80,8 +81,9 @@ patch: add as the first arm of that match, before the `ctrl+b` arm:
 ```rust
 // fork: ctrl+c leaves copy mode without copying. Copy mode consumes
 // every key, so this never reaches the pane as SIGINT.
-(KeyCode::Char('c'), mods) if mods.contains(KeyModifiers::CONTROL) => {
-    self.exit_copy_mode(terminal_runtimes, false);
+(KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+    self.exit_copy_mode(false, outcome);
+    outcome.repaint = true;
     return;
 }
 ```
@@ -90,6 +92,8 @@ The `return` matters. The other arms in this block deliberately fall through to
 the character dispatch below, which is harmless for them because
 `copy_mode_command_char` rejects ctrl chords. Exiting first and then falling
 through would run the character dispatch against a torn-down `copy_mode` state.
+The explicit `outcome.repaint = true` matters for the same reason: the shared
+repaint at the end of the function is what the returning arms skip.
 
 conflict risk: low. Purely additive, in a block upstream changes rarely.
 
@@ -108,27 +112,30 @@ cargo nextest run --locked copy_mode_ctrl_c_exits_without_copying
 
 status: active
 
-upstream base: `9e6c2b4e` (post `v0.8.0`)
+upstream base: `18061191` (post `v0.9.0`)
 
 local files:
 
-- `src/app/input/copy_mode.rs`
+- `src/client/shell/copy_mode.rs`
+- `src/client/shell/tests/copy.rs`
+- `src/client/shell/tests/input.rs`
 
-anchor: `AppState::handle_copy_mode_key`, immediately after
+anchor: `ClientShellState::route_copy_mode_key`, immediately after
 
 ```rust
-let Some(ch) = copy_mode_command_char(key) else {
+let Some(command) = crate::copy_mode::copy_mode_command_char(key.clone()) else {
     return;
 };
 ```
 
-and immediately before upstream's `match ch { ... }` character dispatch.
+and immediately before upstream's `match command { ... }` character dispatch.
 
 reason: Ports the `copy-mode-vi` table from the pre-herdr tmux config (Colemak,
 `neio` as the arrow cluster) onto herdr's fixed copy-mode keymap.
 
-patch shape: a remap expression that rebinds `ch` before upstream's dispatch
-runs, plus a small `AppState::fork_repeat` helper and a `FORK_JUMP` constant.
+patch shape: a remap expression that rebinds `command` before upstream's dispatch
+runs, plus a small `ClientShellState::fork_repeat` helper and a `FORK_JUMP`
+constant.
 **Upstream's match arms are not edited**, so new upstream motions land without
 conflicting. The six repeat-5 keys have no upstream equivalent and are executed
 in the remap block itself rather than dispatched.
@@ -149,13 +156,45 @@ Space, `V` (linewise select), `y`, Enter, `g`/`G`, `{`/`}`, `^`, `0`, `$`, `/`,
 `h`/`j`/`l`, `ctrl+b/f/u/d`, PageUp/PageDown, arrows, Home/End, Esc. Note `q` no
 longer exits — that is what patch 0001 is for.
 
+Shadowed upstream keys: `W`, `E`, `B`, `N` are upstream's big-word and
+reverse-search keys, and the remap takes `W`, `E`, `N` for jump-5 motions.
+`B` still reaches upstream's previous-big-word. Reverse search stays available
+on `K`.
+
+Since `v0.9.0` the word, paragraph, and line-end motions are endpoint-backed
+(`request_copy_motion` → `PaneCopyMotion`) rather than local cursor math, so the
+`W`/`F` repeats enqueue `FORK_JUMP` operations on `copy_operation_queue` and the
+client drains them one round trip at a time. Cursor motions (`N`/`E`/`I`/`O`)
+are still local and apply immediately. The repeat helper therefore sets
+`outcome.repaint` itself instead of falling through to the dispatch's repaint.
+
 The remap must **not** move into `copy_mode_command_char`. The search-prompt
 handler calls that same function to build the query string, so remapping there
 would corrupt what you type into a `/` search.
 
-conflict risk: low. The insert point is a stable two-line anchor and upstream's
-arms are untouched. If upstream adds a motion, it arrives unmapped on its
-default key; decide then whether to fold it into the table.
+adapted upstream tests: the remap changes which key drives a behavior, so five
+key presses in upstream's own tests had to move onto their fork equivalents.
+Each is marked with a `// fork:` comment. Nothing about the assertions changed.
+
+| test | upstream key | fork key |
+| --- | --- | --- |
+| `keyboard_selections_survive_output_and_copy_live_ranges` | `k` | `i` |
+| `keyboard_selection_does_not_return_after_resize_or_screen_switch` | `vk` | `vi` |
+| `keyboard_copy_mode_content_motion_is_endpoint_backed_and_stale_safe` | `w` | `f` |
+| `copy_search_owns_prompt_repeat_highlights_selection_and_restore` | `n`, `N` | `k`, `K` |
+| `highlighted_search_match_copies_after_in_flight_repeat` | `n` | `k` |
+
+The first four are in `src/client/shell/tests/copy.rs`; the last is in
+`src/client/shell/tests/input.rs`.
+
+When a rebase brings new upstream copy-mode tests, expect the same treatment:
+grep the failures for these keys before assuming the remap itself regressed.
+
+conflict risk: low for the remap block itself — the insert point is a stable
+two-line anchor and upstream's arms are untouched. Medium for the adapted tests
+above, which sit in a file upstream edits often. If upstream adds a motion, it
+arrives unmapped on its default key; decide then whether to fold it into the
+table.
 
 remove when: upstream ships configurable copy-mode keys per discussion #587, at
 which point this becomes `copy_mode_*` entries in `config.toml`.
@@ -172,7 +211,7 @@ cargo nextest run --locked copy_mode_colemak
 
 status: active
 
-upstream base: `9e6c2b4e` (post `v0.8.0`)
+upstream base: `18061191` (post `v0.9.0`)
 
 local files:
 
