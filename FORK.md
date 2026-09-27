@@ -60,7 +60,7 @@ become deletable in favor of config in `~/.config/herdr/config.toml`.
 
 status: active
 
-upstream base: `18061191` (post `v0.9.0`)
+upstream base: `fff6c820` (post `v0.9.1`)
 
 local files:
 
@@ -112,7 +112,7 @@ cargo nextest run --locked copy_mode_ctrl_c_exits_without_copying
 
 status: active
 
-upstream base: `18061191` (post `v0.9.0`)
+upstream base: `fff6c820` (post `v0.9.1`)
 
 local files:
 
@@ -172,7 +172,7 @@ The remap must **not** move into `copy_mode_command_char`. The search-prompt
 handler calls that same function to build the query string, so remapping there
 would corrupt what you type into a `/` search.
 
-adapted upstream tests: the remap changes which key drives a behavior, so five
+adapted upstream tests: the remap changes which key drives a behavior, so six
 key presses in upstream's own tests had to move onto their fork equivalents.
 Each is marked with a `// fork:` comment. Nothing about the assertions changed.
 
@@ -182,9 +182,10 @@ Each is marked with a `// fork:` comment. Nothing about the assertions changed.
 | `keyboard_selection_does_not_return_after_resize_or_screen_switch` | `vk` | `vi` |
 | `keyboard_copy_mode_content_motion_is_endpoint_backed_and_stale_safe` | `w` | `f` |
 | `copy_search_owns_prompt_repeat_highlights_selection_and_restore` | `n`, `N` | `k`, `K` |
+| `copy_mode_repeat_during_projection_gap_stays_active` | `k` (×2) | `i` |
 | `highlighted_search_match_copies_after_in_flight_repeat` | `n` | `k` |
 
-The first four are in `src/client/shell/tests/copy.rs`; the last is in
+The first five are in `src/client/shell/tests/copy.rs`; the last is in
 `src/client/shell/tests/input.rs`.
 
 When a rebase brings new upstream copy-mode tests, expect the same treatment:
@@ -211,7 +212,7 @@ cargo nextest run --locked copy_mode_colemak
 
 status: active
 
-upstream base: `18061191` (post `v0.9.0`)
+upstream base: `fff6c820` (post `v0.9.1`)
 
 local files:
 
