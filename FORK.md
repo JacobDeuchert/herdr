@@ -49,7 +49,7 @@ procedure. It is fork-only and has no upstream counterpart.
 
 ## Why these are patches and not config
 
-Upstream herdr 0.9.0 makes only the key that *enters* copy mode configurable
+Upstream herdr 0.9.5 makes only the key that *enters* copy mode configurable
 (`keys.copy_mode`). Every key *inside* copy mode is hardcoded. Making them
 configurable is an open upstream request with no implementation:
 https://github.com/herdrdev/herdr/discussions/587
@@ -63,7 +63,7 @@ become deletable in favor of config in `~/.config/herdr/config.toml`.
 
 status: active
 
-upstream base: `fff6c820` (post `v0.9.1`)
+upstream base: `5608de06` (post `v0.9.5`)
 
 local files:
 
@@ -115,7 +115,7 @@ cargo nextest run --locked copy_mode_ctrl_c_exits_without_copying
 
 status: active
 
-upstream base: `fff6c820` (post `v0.9.1`)
+upstream base: `5608de06` (post `v0.9.5`)
 
 local files:
 
@@ -211,31 +211,44 @@ cargo nextest run --locked copy_mode_colemak
 
 ---
 
-## 0003 encode F13-F24 for child terminals
+## 0003 encode F13-F24 as shifted F1-F12
 
 status: active
 
-upstream base: `fff6c820` (post `v0.9.1`)
+upstream base: `5608de06` (post `v0.9.5`)
 
 local files:
 
-- `src/input/encode.rs`
+- `src/pane/input.rs`
+- `src/pane/terminal.rs` (test only)
 
-anchor: `encode_f_key`, after the existing `F12` arm.
+anchor: `legacy_shell_key`, the exception table for panes that negotiated no
+keyboard protocol. The patch is an early return at the top of the function.
 
-reason: Herdr receives extended function keys from crossterm, but its child
-terminal encoder only handles `F1` through `F12`. `F13` therefore produces no
-PTY input. Encode `F13` through `F24` using xterm's standard shifted `F1`
-through `F12` sequences.
+reason: Since upstream #5017 (post `v0.9.1`) libghostty encodes every pane key,
+and it sends unmodified `F13`-`F24` as rxvt-style `CSI 25~` .. `CSI 34~`
+(`function_keys.zig`). The pane's `TERM=xterm-ghostty` terminfo declares
+`kf13`-`kf24` as xterm's Shift+`F1`-`F12` (`\E[1;2P` .. `\E[24;2~`), so
+terminfo-driven apps never recognise them as F13-F24. The patch rewrites
+unmodified `F13`-`F24` to Shift+`F1`-`F12` and lets libghostty encode that.
+Panes with Kitty keyboard or modifyOtherKeys 2 are untouched and still get
+upstream's encoding.
 
-conflict risk: low. One additive match arm and a focused encoder test.
+history: before `v0.9.5` the patch was an `encode_f_key` arm in
+`src/input/encode.rs`, because herdr's own encoder dropped F13 entirely.
+Upstream deleted that file in #5017.
 
-remove when: upstream's function-key encoder supports `F13` through `F24`.
+conflict risk: low. One early return in a small function plus one test.
+
+remove when: libghostty's legacy F13-F24 sequences match the `xterm-ghostty`
+terminfo `kf13`-`kf24` entries, or upstream remaps them itself. Check
+`vendor/libghostty-vt/src/input/function_keys.zig` against
+`vendor/libghostty-vt/src/terminfo/ghostty.zig`.
 
 verification:
 
 ```sh
-cargo test --locked legacy_f13_to_f24_use_shifted_function_key_sequences
+cargo nextest run --locked legacy_f13_to_f24_use_shifted_function_key_sequences
 ```
 
 ---
