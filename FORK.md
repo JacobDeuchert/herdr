@@ -26,7 +26,7 @@ git rebase upstream/master          # or: git rebase <tag>
 If a patch conflicts, do not resolve it hunk by hunk:
 
 ```sh
-git checkout --theirs <file>        # take upstream's version whole
+git checkout --ours <file>          # mid-rebase, "ours" is upstream: take it whole
 ```
 
 Then reapply the patch from its entry below, run its verification, and update
@@ -43,6 +43,9 @@ cargo build --release
 
 The build needs Zig 0.16.0 for the vendored `libghostty-vt`. Fork builds do not
 receive `herdr update`; reinstall the binary yourself.
+
+The `herdr-fork-sync` skill in `.claude/skills/` automates this whole
+procedure. It is fork-only and has no upstream counterpart.
 
 ## Why these are patches and not config
 
