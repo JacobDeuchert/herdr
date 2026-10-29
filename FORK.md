@@ -4,7 +4,7 @@ This fork tracks `herdrdev/herdr` and carries a small set of deliberate local
 changes. This file is the complete inventory. Nothing else in this tree is
 intentionally divergent from upstream.
 
-The point of this file: when a rebase conflicts, **take upstream's side wholesale**
+The point of this file: when an upstream merge conflicts, **take upstream's side wholesale**
 and reapply the patches below from scratch. Every patch is written to be
 reapplied by hand in a few minutes, against an anchor that is described in prose
 rather than by line number, so upstream drift does not invalidate it.
@@ -16,17 +16,21 @@ origin    https://github.com/JacobDeuchert/herdr   (this fork)
 upstream  https://github.com/herdrdev/herdr        (canonical)
 ```
 
+The fork's `master` carries the patches. Upstream is merged into it, never
+rebased under it, so `master` is only ever fast-forward pushed. The full patch
+set at any time is `git diff upstream/master...master`.
+
 ## Upgrade procedure
 
 ```sh
 git fetch upstream
-git rebase upstream/master          # or: git rebase <tag>
+git merge --no-ff upstream/master   # or: git merge --no-ff <tag>
 ```
 
 If a patch conflicts, do not resolve it hunk by hunk:
 
 ```sh
-git checkout --ours <file>          # mid-rebase, "ours" is upstream: take it whole
+git checkout --theirs <file>        # mid-merge, "theirs" is upstream: take it whole
 ```
 
 Then reapply the patch from its entry below, run its verification, and update
@@ -191,7 +195,7 @@ Each is marked with a `// fork:` comment. Nothing about the assertions changed.
 The first five are in `src/client/shell/tests/copy.rs`; the last is in
 `src/client/shell/tests/input.rs`.
 
-When a rebase brings new upstream copy-mode tests, expect the same treatment:
+When a merge brings new upstream copy-mode tests, expect the same treatment:
 grep the failures for these keys before assuming the remap itself regressed.
 
 conflict risk: low for the remap block itself — the insert point is a stable

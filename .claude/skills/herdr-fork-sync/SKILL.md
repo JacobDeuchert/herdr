@@ -1,6 +1,6 @@
 ---
 name: herdr-fork-sync
-description: Update this herdr fork (JacobDeuchert/herdr, branch fork/copy-mode) to upstream herdrdev/herdr. Rebases the fork patches, checks each patch's removal condition, repairs broken patches and adapted tests, and updates FORK.md. Use when the user says "update to upstream", "sync with upstream", "rebase onto upstream", "pull upstream", or names a new upstream herdr version.
+description: Update this herdr fork (JacobDeuchert/herdr, branch master) to upstream herdrdev/herdr. Merges upstream in, checks each patch's removal condition, repairs broken patches and adapted tests, and updates FORK.md. Use when the user says "update to upstream", "sync with upstream", "merge upstream", "pull upstream", or names a new upstream herdr version.
 ---
 
 # Herdr fork upstream sync
@@ -15,24 +15,29 @@ Stop only at the checkpoints marked **ask**.
 
 ## 1. Preflight
 
-- Run this in the main checkout (`~/src/github/herdr`) on branch `fork/copy-mode`.
-  The working tree must be clean. If it isn't, stop and report.
+- Run this in the main checkout (`~/src/github/herdr`) on branch `master`.
+  The fork's `master` carries the patches; it is never a plain mirror of
+  upstream. The working tree must be clean. If it isn't, stop and report.
 - `git fetch upstream --tags --prune` and `git fetch origin`.
 - Choose the target:
-  - Default: `upstream/master`. Previous syncs rebased onto master, and
-    FORK.md records the base as `<sha> (post vX.Y.Z)`.
-  - If the user names a version, use that tag. Stable tags
-    sit on release commits that are **not ancestors of master**, so rebasing onto
-    a tag and later onto master works, but `git describe` on master won't print
-    the tag. Get the label with `git tag --sort=-creatordate | grep '^v' | head -1`.
+  - Default: `upstream/master`. FORK.md records the base as
+    `<sha> (post vX.Y.Z)`.
+  - If the user names a version, use that tag. Stable tags sit on release
+    commits that are **not ancestors of upstream master**. Merging one brings in
+    its version-bump commit, so a later merge of upstream master may conflict on
+    the version in `Cargo.toml`/`Cargo.lock`. Take upstream's side there.
+  - Get the version label with
+    `git tag --sort=-creatordate | grep '^v' | head -1`.
 - Record the old base: `git merge-base HEAD upstream/master`.
-- Get the fork commits with `git log --oneline <old-base>..HEAD`. Expect one
-  commit per patch plus `docs(fork):` commits. Anything else is an untracked
-  divergence. Flag it to the user.
-- Create a backup branch: `git branch fork/copy-mode-prerebase-<label>`, where
-  `<label>` is the newest upstream version, like `v0.9.5`.
+- Check the fork's own changes with
+  `git log --oneline --no-merges <old-base>..HEAD` and
+  `git diff --stat <old-base> HEAD`. Every changed file must belong to a
+  FORK.md patch, FORK.md itself, or `.claude/skills/herdr-fork-sync/`.
+  Anything else is an untracked divergence. Flag it to the user.
+- No backup branch is needed. A merge doesn't rewrite history, and
+  `git reset --hard ORIG_HEAD` undoes it before pushing.
 
-## 2. Check each patch's removal condition before rebasing
+## 2. Check each patch's removal condition before merging
 
 For every `status: active` entry in FORK.md, check its `remove when:` condition
 against the target. Use evidence, not commit subjects alone:
@@ -56,23 +61,32 @@ remove or replace, and the patch's behavior would change in a way the user
 would notice, **ask** before deleting it. Show the evidence. If upstream covers
 it exactly, go ahead and remove it.
 
-## 3. Rebase
+## 3. Merge
 
 ```sh
-git rebase <target>
+git merge --no-ff <target> -m "chore(fork): merge upstream <label>"
 ```
 
-For each conflict, follow FORK.md: **don't resolve hunk by hunk**. Take
-upstream's version of the file whole with `git checkout --ours <file>`. During a
-rebase, `--ours` is the upstream base and `--theirs` is the fork commit being
-replayed. Then reapply the patch by hand from its FORK.md entry at the
-described anchor. If the anchor has moved or been renamed, find its new home
-by function name and describe it in FORK.md.
+`<label>` is the newest version plus the short SHA when merging master, like
+`v0.9.5 (ee5bfb50)`, or just the tag when merging a tag.
 
-To remove a patch, drop its commit (`git rebase -i` isn't available). Use
-`git rebase --onto` or revert-style edits in a follow-up commit, whichever
-keeps history readable. Then delete its FORK.md entry and add a line under a
-"Retired patches" section with the upstream commit or version that replaced it.
+For each conflict, follow FORK.md: **don't resolve hunk by hunk**. Take
+upstream's version of the file whole with `git checkout --theirs <file>`.
+During a merge, `--ours` is the fork's `master` and `--theirs` is upstream.
+Then reapply the patch by hand from its FORK.md entry at the described anchor,
+`git add` the file, and finish with `git commit --no-edit`. If the anchor has
+moved or been renamed, find its new home by function name and describe it in
+FORK.md.
+
+To remove a patch, undo it in its own commit after the merge
+(`revert(fork): drop patch 000N`). `git revert` of the original patch commit
+usually won't apply after upstream drift, so undo it by hand against the
+current code. Then delete its FORK.md entry and add a line under a
+"Retired patches" section with the upstream commit or version that replaced
+it.
+
+The whole fork patch set is always `git diff upstream/master...master`
+(three dots: changes on the fork side since the merge base).
 
 ## 4. Verify and repair
 
@@ -128,29 +142,28 @@ or be shadowed by the remap. List them for the user.
 ## 5. Update FORK.md and commit
 
 - Update every patch's `upstream base:` line to the new base, in the form
-  `` `<short-sha>` (post `vX.Y.Z`) `` (or the tag itself when rebased onto a
+  `` `<short-sha>` (post `vX.Y.Z`) `` (or the tag itself when merging a
   tag).
 - Update anchors, local files, the adapted-tests table, the "Why these are
   patches" section (version number and discussion status), and the
   "Not patched" notes if upstream changed any of them.
-- Commit with the `commit-by-convention` skill. Follow the convention of earlier
-  syncs:
-  `docs(fork): rebase patches onto upstream vX.Y.Z`. The body says which
-  patches landed or were removed, what moved, and which upstream tests were
-  adapted. Don't add AI co-author lines (project rule).
-- Patch-code fixes are amended into the patch's own commit
-  (`git commit --fixup <sha>` then `git rebase --autosquash <target>`,
-  non-interactive via `GIT_SEQUENCE_EDITOR=true`), so each patch stays one
-  commit.
+- Commit with the `commit-by-convention` skill:
+  `docs(fork): sync patches with upstream <label>`. The body says which
+  patches were kept, repaired, or removed, what moved, and which upstream
+  tests were adapted. Don't add AI co-author lines (project rule).
+- Patch-code repairs and adapted tests that weren't resolved inside the merge
+  commit go in their own commits after the merge, like
+  `fix(fork): reapply colemak remap after <upstream change>` or
+  `test(fork): move <test> onto fork keys`. Never rewrite published history.
 
 ## 6. Finish
 
 - Show a summary. For each patch, give kept/removed/repaired, the upstream
   version, adapted tests, new unmapped upstream copy-mode keys, and validation
   results.
-- **ask** before pushing. The push rewrites history:
-  `git push --force-with-lease origin fork/copy-mode`.
+- **ask** before pushing: `git push origin master`. This is a normal
+  fast-forward push; never force-push `master`.
 - Don't install the binary. The installed `herdr` comes from the user's Nix
   home-manager config, so tell the user it needs a rebuild.
-- Keep the backup branch. Mention older `fork/copy-mode-prerebase-*` branches
-  the user may want to delete. Don't delete them without asking.
+- Mention leftover `fork/copy-mode*` branches from the old rebase workflow the
+  user may want to delete. Don't delete them without asking.
