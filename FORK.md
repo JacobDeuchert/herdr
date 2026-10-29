@@ -63,7 +63,7 @@ become deletable in favor of config in `~/.config/herdr/config.toml`.
 
 status: active
 
-upstream base: `5608de06` (post `v0.9.5`)
+upstream base: `ee5bfb50` (post `v0.9.5`)
 
 local files:
 
@@ -115,7 +115,7 @@ cargo nextest run --locked copy_mode_ctrl_c_exits_without_copying
 
 status: active
 
-upstream base: `5608de06` (post `v0.9.5`)
+upstream base: `ee5bfb50` (post `v0.9.5`)
 
 local files:
 
@@ -215,7 +215,7 @@ cargo nextest run --locked copy_mode_colemak
 
 status: active
 
-upstream base: `5608de06` (post `v0.9.5`)
+upstream base: `ee5bfb50` (post `v0.9.5`)
 
 local files:
 
