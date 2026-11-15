@@ -670,6 +670,10 @@ impl ClientShellState {
 
         match self.mode {
             ClientShellMode::Terminal => {
+                // fork: FORK.md 0004
+                if self.fork_main_agent_key(key, crate::input::KeybindDispatch::Direct, outcome) {
+                    return None;
+                }
                 if let Some(binding) =
                     crate::input::resolve_direct_binding(&self.config.keybinds.keybinds, key)
                 {
@@ -697,6 +701,12 @@ impl ClientShellState {
                     return self.focused_pane_id().map(ClientInputTarget::Pane);
                 }
                 if key.code == KeyCode::Esc {
+                    self.mode = return_mode;
+                    outcome.repaint = true;
+                    return None;
+                }
+                // fork: FORK.md 0004
+                if self.fork_main_agent_key(key, crate::input::KeybindDispatch::Prefix, outcome) {
                     self.mode = return_mode;
                     outcome.repaint = true;
                     return None;

@@ -16,6 +16,7 @@ mod endpoint_navigation;
 mod endpoint_notices;
 mod endpoint_sidebar;
 mod endpoints;
+mod fork_main_agent; // fork: FORK.md 0004
 pub(super) use endpoints::*;
 mod global_menu;
 mod graphics;

@@ -51,6 +51,8 @@ pub(crate) struct ClientShellConfig {
     pub(super) preferences: preferences::ClientChromePreferences,
     pub(super) startup_config_diagnostic: Option<String>,
     pub(super) startup_onboarding: bool,
+    // fork: FORK.md 0004
+    pub(super) main_agent: super::fork_main_agent::ClientMainAgent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +85,8 @@ pub(super) enum ClientMobileTarget {
 
 #[derive(Default)]
 pub(super) struct ShellHitMap {
+    // fork: FORK.md 0004
+    pub(super) fork_main_agent: Option<super::fork_main_agent::MainAgentHit>,
     pub(super) machines: Vec<MachineHit>,
     pub(super) workspaces: Vec<WorkspaceHit>,
     pub(super) workspace_body: Rect,
@@ -896,6 +900,8 @@ pub(crate) struct ClientShellState {
     pub(super) last_composed_at: Option<std::time::Instant>,
     pub(super) selection_repaint_deadline: Option<std::time::Instant>,
     pub(super) hits: ShellHitMap,
+    // fork: FORK.md 0004, where the Main toggle returns to.
+    pub(super) fork_main_agent_return: Option<(ClientEndpointId, String)>,
     pub(super) endpoints: Vec<ClientShellEndpoint>,
     pub(super) active_endpoint_id: ClientEndpointId,
     pub(super) collapsed_endpoints: HashSet<ClientEndpointId>,
@@ -1070,6 +1076,7 @@ impl ClientShellState {
             last_composed_at: None,
             selection_repaint_deadline: None,
             hits: ShellHitMap::default(),
+            fork_main_agent_return: None,
             endpoints: vec![local_endpoint()],
             active_endpoint_id: ClientEndpointId::Local,
             collapsed_endpoints: HashSet::new(),

@@ -159,6 +159,9 @@ impl ClientShellConfig {
             preferences: preferences::ClientChromePreferences::default(),
             startup_config_diagnostic: None,
             startup_onboarding: false,
+            // fork: FORK.md 0004
+            main_agent: super::fork_main_agent::ClientMainAgent::from_config(&config.ui.main_agent)
+                .0,
         }
     }
 
@@ -366,6 +369,11 @@ impl ClientShellConfig {
                 self.mouse_scroll_lines = ui.mouse_scroll_lines();
                 self.right_click_passthrough_modifiers = ui.right_click_passthrough_modifiers();
                 self.redraw_on_focus_gained = ui.redraw_on_focus_gained;
+                // fork: FORK.md 0004
+                let (main_agent, diagnostic) =
+                    super::fork_main_agent::ClientMainAgent::from_config(&ui.main_agent);
+                self.main_agent = main_agent;
+                diagnostics.extend(diagnostic);
             }
         }
 

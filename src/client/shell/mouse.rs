@@ -2088,6 +2088,10 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                // fork: FORK.md 0004
+                if self.fork_main_agent_click(point, outcome) {
+                    return;
+                }
                 let group_toggle = self.hits.workspaces.iter().find_map(|hit| {
                     let (rect, key) = hit.group_toggle.as_ref()?;
                     super::contains(*rect, point).then(|| (hit.endpoint_id.clone(), key.clone()))

@@ -58,8 +58,12 @@ Upstream herdr 0.9.5 makes only the key that *enters* copy mode configurable
 configurable is an open upstream request with no implementation:
 https://github.com/herdrdev/herdr/discussions/587
 
-If that discussion ships a `copy_mode_*` config surface, all patches below
+If that discussion ships a `copy_mode_*` config surface, patches 0001 and 0002
 become deletable in favor of config in `~/.config/herdr/config.toml`.
+
+Patch 0004 is a feature rather than a keymap: plugin v1 has no sidebar UI
+("native non-terminal plugin UI is not part of plugin v1", plugins docs), so a
+pinned row cannot come from a plugin.
 
 ---
 
@@ -253,6 +257,91 @@ verification:
 
 ```sh
 cargo nextest run --locked legacy_f13_to_f24_use_shifted_function_key_sequences
+```
+
+---
+
+## 0004 pinned Main agent row (`[ui.main_agent]`)
+
+status: active
+
+upstream base: `ee5bfb50` (post `v0.9.5`)
+
+local files (new, fork-only):
+
+- `src/config/fork_main_agent.rs` — `MainAgentConfig`
+- `src/client/shell/fork_main_agent.rs` — hiding, pinned row, toggle, click
+- `src/client/shell/tests/fork_main_agent.rs`
+
+touched upstream files (each hook is marked `// fork: FORK.md 0004`):
+
+| file | anchor | hook |
+| --- | --- | --- |
+| `src/config.rs` | `mod` list and `pub use self::{` | declare and export `fork_main_agent` |
+| `src/config/model.rs` | end of `struct UiConfig` and its `Default` | `main_agent` field |
+| `src/client/shell.rs` | `mod` list | `mod fork_main_agent;` |
+| `src/client/shell/state.rs` | end of `ClientShellConfig`; top of `ShellHitMap`; `hits:` in `ClientShellState` and its constructor | `main_agent`, `fork_main_agent` hit, `fork_main_agent_return` |
+| `src/client/shell/config.rs` | `ClientShellConfig::from_config`; the `[ui]` block of `apply_live_config` | build `ClientMainAgent` (also publishes the hidden label) |
+| `src/client/shell/sidebar.rs` | end of `workspace_entries`; top of `render_sidebar` after `render_sidebar_background` | `retain` filter; `render_pinned_row` |
+| `src/client/shell/endpoint_sidebar.rs` | top of `render_expanded` after `render_sidebar_background` | `render_pinned_row` |
+| `src/client/shell/mouse.rs` | left press, just before the workspace `group_toggle` lookup | `fork_main_agent_click` |
+| `src/client/shell/input.rs` | `ClientShellMode::Terminal` before `resolve_direct_binding`; `ClientShellMode::Prefix` before `resolve_prefix_binding` | `fork_main_agent_key` |
+| `src/client/shell/tests/mod.rs` | test `mod` list | `mod fork_main_agent;` |
+
+reason: D36 in workflow-hub. The shared herdr app on the host holds Main (the
+Hermes TUI) as a permanent, pinned sidebar entry above the machines and
+spaces, and `SUPER+G` jumps to it.
+
+behaviour:
+
+```toml
+[ui.main_agent]
+workspace = "Main"   # label of a local workspace; empty (default) disables everything
+title = ""           # row text, defaults to the label
+key = "prefix+m"     # toggle; empty leaves it unbound
+```
+
+- The workspace with that label is filtered out of `workspace_entries`, which
+  every expanded list, navigation, mouse and mobile path goes through.
+- `render_pinned_row` takes two rows off the top of both expanded sidebars
+  (local-only `render_sidebar` and the multi-machine `render_expanded`):
+  `◆ <title> … running`, or `◇ … stopped` when the local server has no such
+  workspace. Highlighted while it is the shown workspace on the local server.
+- Click or `key` while elsewhere: remember `(endpoint, workspace)` and
+  `focus_or_activate(Local, Workspace(main))`, so it also switches away from a
+  remote machine. `key` on Main: return to the remembered place.
+- Missing workspace: an `Unavailable` notice, nothing else. herdr never
+  creates or restarts it; the `local.main-agent` plugin in nixos-work does
+  that over the CLI.
+- The key is matched before the regular bindings in Terminal and Prefix mode
+  only (not in copy mode, navigate or resize). It is not part of `[keys]`, so
+  `herdr config check`, the keybinding help and the settings UI do not list it.
+
+design notes: client-only, no protocol or server change. The hidden label is
+a process-wide `RwLock<String>` set whenever the client config is built,
+instead of a new `workspace_entries` parameter, so the eleven upstream call
+sites stay untouched. Matching is by label on every endpoint: a remote
+workspace labelled `Main` is hidden too.
+
+known gaps: the collapsed sidebars (`render_collapsed_sidebar`,
+`endpoint_sidebar::render_collapsed`) iterate `snapshot.workspaces` directly,
+so Main shows there as a normal entry and has no pinned row. The navigator
+(`goto`) and the workspace picker are not filtered either. No agent status:
+Main runs behind `docker exec`, which herdr cannot detect, and the container
+gets no herdr socket (D20/D36).
+
+conflict risk: medium. Each hook is one or a few lines, but `render_sidebar`,
+`render_expanded`, the mouse press handler and `route_key` are hot upstream
+code. The config field is additive. On conflict, take upstream and re-add the
+hooks from the table; the new files rarely need changes.
+
+remove when: never upstream; this is a fork feature. Delete with the files and
+hooks above if the pinned row is dropped.
+
+verification:
+
+```sh
+cargo nextest run --locked main_agent
 ```
 
 ---

@@ -1007,6 +1007,8 @@ pub struct UiConfig {
     pub toast: ToastConfig,
     /// Play sounds when agents change state in background workspaces.
     pub sound: SoundConfig,
+    /// fork: pinned Main agent row (FORK.md 0004).
+    pub main_agent: super::fork_main_agent::MainAgentConfig,
 }
 
 /// Cursor shape (DECSCUSR) used for the forced IME anchor.
@@ -1230,6 +1232,7 @@ impl Default for UiConfig {
             accent: "cyan".into(),
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
+            main_agent: Default::default(),
         }
     }
 }

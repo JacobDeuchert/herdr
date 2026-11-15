@@ -206,6 +206,15 @@ pub(crate) fn render_sidebar(
 ) {
     let palette = &config.palette;
     render_sidebar_background(buffer, area, palette);
+    // fork: FORK.md 0004
+    let area = crate::client::shell::fork_main_agent::render_pinned_row(
+        buffer,
+        area,
+        Some(snapshot),
+        state.active_endpoint_id.is_local(),
+        config,
+        hits,
+    );
     hits.sidebar_divider = if area.is_empty() {
         Rect::default()
     } else {
@@ -550,6 +559,12 @@ pub(crate) fn workspace_entries(
             });
         }
     }
+    // fork: FORK.md 0004, Main has its pinned row instead.
+    entries.retain(|entry| {
+        !crate::client::shell::fork_main_agent::is_hidden_workspace(
+            &snapshot.workspaces[entry.index],
+        )
+    });
     entries
 }
 

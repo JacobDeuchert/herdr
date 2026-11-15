@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
+mod fork_main_agent; // fork: FORK.md 0004
 mod io;
 mod keybinds;
 mod model;
@@ -11,6 +12,7 @@ mod window_title;
 mod write;
 
 pub use self::{
+    fork_main_agent::MainAgentConfig,
     io::{
         config_diagnostic_summary, config_dir, config_path, load_live_config,
         remove_keybinding_config_sections, remove_section_key, state_dir, upsert_section_bool,

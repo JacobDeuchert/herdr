@@ -244,6 +244,19 @@ pub(super) fn render_expanded(
 ) {
     let palette = &config.palette;
     super::render::render_sidebar_background(buffer, area, palette);
+    // fork: FORK.md 0004
+    let area = super::fork_main_agent::render_pinned_row(
+        buffer,
+        area,
+        super::fork_main_agent::local_snapshot(
+            active_snapshot,
+            state.active_endpoint_id,
+            state.endpoints,
+        ),
+        state.active_endpoint_id.is_local(),
+        config,
+        hits,
+    );
     hits.sidebar_divider = if area.is_empty() {
         Rect::default()
     } else {
