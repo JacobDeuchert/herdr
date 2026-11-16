@@ -17,6 +17,7 @@ mod api_helpers;
 pub(crate) use api_helpers::limit_snapshot_lines;
 mod creation;
 mod custom_commands;
+mod fork_threads; // fork: FORK.md 0005
 mod git_refresh;
 mod ids;
 mod popup;
@@ -51,6 +52,10 @@ use crate::config::Config;
 use crate::events::AppEvent;
 
 pub use state::{AppState, Mode, ToastKind, ViewState};
+// fork: FORK.md 0005
+pub(crate) use fork_threads::{
+    RESUME_TOKEN as FORK_RESUME_TOKEN, SESSIONS_TOKEN as FORK_SESSIONS_TOKEN,
+};
 
 pub(crate) fn load_plugin_manifest(
     path: &str,

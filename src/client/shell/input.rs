@@ -766,7 +766,15 @@ impl ClientShellState {
         use crate::input::{KeybindAction, KeybindDispatch, KeybindMatch};
 
         self.pending_workspace_highlight = None;
+        // fork: FORK.md 0005
+        if key.code != KeyCode::Esc
+            && !self.config.keybinds.matches_prefix(key)
+            && self.fork_threads_navigate_key(key, outcome)
+        {
+            return;
+        }
         if key.code == KeyCode::Esc || self.config.keybinds.matches_prefix(key) {
+            super::fork_threads::update_view(|view| view.cursor = None);
             self.cancel_navigate(outcome);
             return;
         }

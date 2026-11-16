@@ -3115,6 +3115,46 @@
           ],
           "type": "string"
         },
+        "PaneRunCommandParams": {
+          "description": "Runs a shell command line in a fresh pane, which is placed by the first\ntarget that is set:\n\n- `replace_pane_id`: takes that pane's place (split next to it, then close\n  it), so a long-running program restarts in place on new arguments;\n- `workspace_id`: split off that workspace's focused pane;\n- neither: a new workspace with `cwd` and `label`.\n\nThe command is typed into the new pane's shell, the same way a restored\nagent session is resumed. Answers with the new pane.",
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "focus": {
+              "default": false,
+              "type": "boolean"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "replace_pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        },
         "PaneScrollParams": {
           "properties": {
             "offset_from_bottom": {
@@ -6049,6 +6089,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.run_command",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneRunCommandParams"
             }
           },
           "required": [

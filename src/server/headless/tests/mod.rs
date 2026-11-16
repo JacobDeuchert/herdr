@@ -2,6 +2,7 @@ use super::*;
 
 mod event_fairness;
 mod fork_main_agent; // fork: FORK.md 0004
+mod fork_threads; // fork: FORK.md 0005
 mod native_graphics;
 #[path = "pane_move.rs"]
 mod pane_move_tests;

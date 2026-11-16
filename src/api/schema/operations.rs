@@ -198,6 +198,7 @@ mod tests {
             "pane.clear_agent_authority",
             "pane.release_agent",
             "pane.close",
+            "pane.run_command", // fork: FORK.md 0005
             "popup.close",
             "plugin.unlink",
             "plugin.disable",

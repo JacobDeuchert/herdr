@@ -14,7 +14,7 @@ mod write;
 
 pub use self::{
     fork_main_agent::MainAgentConfig,
-    fork_threads::ThreadsConfig,
+    fork_threads::{ThreadsConfig, THREAD_PLACEHOLDER},
     io::{
         config_diagnostic_summary, config_dir, config_path, load_live_config,
         remove_keybinding_config_sections, remove_section_key, state_dir, upsert_section_bool,

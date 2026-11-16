@@ -157,6 +157,11 @@ pub(super) fn snapshot_with_completions(
             let mut state_labels = agent.state_labels.into_iter().collect::<Vec<_>>();
             state_labels.sort_by(|left, right| left.0.cmp(&right.0));
             let mut tokens = agent.tokens.into_iter().collect::<Vec<_>>();
+            // fork: FORK.md 0005
+            tokens.extend(
+                app.fork_pane_resume_line(&pane_id)
+                    .map(|line| (crate::app::FORK_RESUME_TOKEN.to_owned(), line)),
+            );
             tokens.sort_by(|left, right| left.0.cmp(&right.0));
             protocol::ClientShellAgent {
                 pane_id,

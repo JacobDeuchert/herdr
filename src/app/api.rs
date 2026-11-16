@@ -1227,6 +1227,10 @@ impl App {
                 return self.handle_pane_send_input(request.id, params);
             }
             Method::PaneClose(target) => return self.handle_pane_close(request.id, target),
+            // fork: FORK.md 0005
+            Method::PaneRunCommand(params) => {
+                return self.fork_handle_pane_run_command(request.id, params)
+            }
             Method::PopupClose(_) => {
                 return if self.close_popup_pane() {
                     responses::encode_success(request.id, ResponseResult::Ok {})

@@ -4,6 +4,7 @@ pub mod agents;
 pub mod commands;
 pub mod common;
 pub mod events;
+pub mod fork_threads; // fork: FORK.md 0005
 pub mod integrations;
 pub(crate) mod operations;
 pub mod panes;
@@ -19,6 +20,7 @@ pub use agents::*;
 pub use commands::*;
 pub use common::*;
 pub use events::*;
+pub use fork_threads::*;
 pub use integrations::*;
 pub use panes::*;
 pub use plugins::*;
@@ -130,6 +132,8 @@ operations::define_operations! {
     PaneClearAgentAuthority(PaneClearAgentAuthorityParams) => "pane.clear_agent_authority", true, false;
     PaneReleaseAgent(PaneReleaseAgentParams) => "pane.release_agent", true, false;
     PaneClose(PaneTarget) => "pane.close", true, true;
+    // fork: FORK.md 0005
+    PaneRunCommand(PaneRunCommandParams) => "pane.run_command", true, true;
     PopupClose(EmptyParams) => "popup.close", true, false;
     EventsSubscribe(EventsSubscribeParams) => "events.subscribe", false, false;
     EventsWait(EventsWaitParams) => "events.wait", false, false;

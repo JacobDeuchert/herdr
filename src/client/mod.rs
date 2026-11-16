@@ -2372,7 +2372,7 @@ async fn run_client_loop(
                         }
                         let (effects, notification_repaint) = shell.tick_notifications(now);
                         // fork: FORK.md 0005
-                        outcome.repaint |= shell.fork_threads_tick();
+                        shell.fork_threads_tick(&mut outcome);
                         outcome.repaint |= notification_repaint
                             | shell.tick_copy_feedback(now)
                             | shell.tick_workspace_highlight(now)

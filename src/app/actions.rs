@@ -1524,13 +1524,18 @@ impl AppState {
                 agent_label,
                 seq,
                 argv,
-            } => self
-                .update_terminal_state(pane_id, |terminal| {
-                    terminal.record_reported_resume(&source, &agent_label, seq, argv);
-                    None
-                })
-                .into_iter()
-                .collect(),
+            } => {
+                let updates = self
+                    .update_terminal_state(pane_id, |terminal| {
+                        terminal.record_reported_resume(&source, &agent_label, seq, argv);
+                        None
+                    })
+                    .into_iter()
+                    .collect();
+                // fork: FORK.md 0005
+                self.fork_record_session_command(pane_id);
+                updates
+            }
             AppEvent::ReportedAgentShellReturned {
                 pane_id,
                 observed_at,

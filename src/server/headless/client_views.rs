@@ -232,6 +232,7 @@ impl HeadlessServer {
                 | Method::PaneEditScrollback(_)
                 | Method::PaneMove(_)
                 | Method::PaneSplit(_)
+                | Method::PaneRunCommand(_) // fork: FORK.md 0005
                 | Method::TabClose(_)
                 | Method::TabCreate(_)
                 | Method::WorkspaceClose(_)
@@ -264,6 +265,7 @@ impl HeadlessServer {
                 | Method::PaneScroll(_)
                 | Method::PaneClear(_)
                 | Method::PaneSplit(_)
+                | Method::PaneRunCommand(_) // fork: FORK.md 0005
                 | Method::PaneSwap(_)
                 | Method::PaneZoom(_)
                 | Method::TabClose(_)
@@ -297,6 +299,7 @@ impl HeadlessServer {
                 | Method::PaneFocusDirection(_)
                 | Method::PaneResize(_)
                 | Method::PaneSplit(_)
+                | Method::PaneRunCommand(_) // fork: FORK.md 0005
                 | Method::PaneSwap(_)
                 | Method::PaneZoom(_)
                 | Method::TabClose(_)

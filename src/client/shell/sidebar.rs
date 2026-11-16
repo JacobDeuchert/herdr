@@ -574,6 +574,10 @@ pub(crate) fn workspace_entries(
             &snapshot.workspaces[entry.index],
         )
     });
+    // fork: FORK.md 0005, workspaces that own listed threads show as threads.
+    entries.retain(|entry| {
+        !crate::client::shell::fork_threads::is_hidden_workspace(&snapshot.workspaces[entry.index])
+    });
     entries
 }
 
