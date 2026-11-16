@@ -65,6 +65,10 @@ Patch 0004 is a feature rather than a keymap: plugin v1 has no sidebar UI
 ("native non-terminal plugin UI is not part of plugin v1", plugins docs), so a
 pinned row cannot come from a plugin.
 
+Patch 0005 is a feature for the same reason, and it also needs server facts
+plugins cannot add to the client-shell projection (the pane's resume command,
+a per-workspace history of them) plus one new client-shell method.
+
 ---
 
 ## 0001 ctrl+c exits copy mode
@@ -378,6 +382,172 @@ tmux pane, a throwaway `--remote-session` on devvm as second machine):
 `show` from another workspace and from the VM lands on Main, `show` on Main
 stays, `prefix+m` returns (also to the VM), `view` reports `active: false`
 while the VM is shown.
+
+---
+
+## 0005 sidebar thread list (`[ui.threads]`)
+
+status: active
+
+upstream base: `ee5bfb50` (post `v0.9.5`)
+
+local files (new, fork-only):
+
+- `src/config/fork_threads.rs` — `ThreadsConfig`, `THREAD_PLACEHOLDER`
+- `src/client/shell/fork_threads_feed.rs` — HTTP/SSE reader, parsing, sanitizing (+ stub service in its tests)
+- `src/client/shell/fork_threads.rs` — thread block, command template, mapping, hiding, open plan, click, navigate keys
+- `src/client/shell/tests/fork_threads.rs`
+- `src/app/fork_threads.rs` — resume history token, `fork.resume` projection helper, `pane.run_command`
+- `src/api/schema/fork_threads.rs` — `PaneRunCommandParams`
+- `src/server/headless/tests/fork_threads.rs`
+
+touched upstream files (each hook is marked `// fork: FORK.md 0005`):
+
+| file | anchor | hook |
+| --- | --- | --- |
+| `src/config.rs` | `mod` list and `pub use self::{` | declare and export `fork_threads` |
+| `src/config/model.rs` | end of `struct UiConfig` and its `Default` | `threads` field |
+| `src/client/shell.rs` | `mod` list | `mod fork_threads; mod fork_threads_feed;` |
+| `src/client/shell/state.rs` | end of `ClientShellConfig`; top of `ShellHitMap` | `threads`, `fork_threads` hits |
+| `src/client/shell/config.rs` | `ClientShellConfig::from_config`; the `[ui]` block of `apply_live_config` | build `ClientThreads` (also starts/stops the reader) |
+| `src/client/shell/sidebar.rs` | `render_sidebar` after the 0004 pinned row; end of `workspace_entries` after the 0004 `retain` | `render_sidebar_threads`; second `retain` |
+| `src/client/shell/endpoint_sidebar.rs` | `render_expanded` after the 0004 pinned row | `render_sidebar_threads` |
+| `src/client/shell/mouse.rs` | left press, after the 0004 click hook | `fork_threads_click` |
+| `src/client/shell/input.rs` | top of `route_navigate_key`, before the Esc/prefix cancel; inside that cancel | `fork_threads_navigate_key`; clear the cursor |
+| `src/client/mod.rs` | `ClientLoopEvent::Timer`, next to `tick_notifications` | `shell.fork_threads_tick(&mut outcome)` |
+| `src/client/shell/tests/mod.rs` | test `mod` list | `mod fork_threads;` |
+| `src/app/mod.rs` | `mod` list; after `pub use state::{…}` | `mod fork_threads;`, re-export the two token keys |
+| `src/app/actions.rs` | `AppEvent::AgentResumeReported` arm of `handle_app_event` | `fork_record_session_command(pane_id)` after the update |
+| `src/app/api.rs` | app-mode `match`, after `PaneClose` | dispatch `PaneRunCommand` |
+| `src/api/schema.rs` | `mod`/`pub use` lists; `define_operations!` after `PaneClose` | `fork_threads`; `PaneRunCommand => "pane.run_command", true, true` |
+| `src/api/schema/operations.rs` | `operation_ui_impact_preserves_existing_classification` | `"pane.run_command"` |
+| `src/server/client_shell.rs` | agent projection, after `tokens` is collected | push `fork.resume` |
+| `src/server/headless/client_views.rs` | the three `matches!` lists that contain `Method::PaneSplit(_)` | `Method::PaneRunCommand(_)` |
+| `src/server/client_commands.rs` | `advertised_client_shell_method_shapes_stay_at_the_v1_contract`, after the `pane.link.resolve` freeze | freeze the `pane.run_command` digest |
+| `src/server/headless/tests/mod.rs` | test `mod` list | `mod fork_threads;` |
+| `docs/next/api/herdr-api.schema.json` | generated | `HERDR_UPDATE_API_SCHEMA=1 just test-one generated_protocol_schema_artifact_is_current` |
+
+reason: D39 + D41 in workflow-hub. The host client lists the coding-agent
+threads of tkd (on the dev VM) in the sidebar; each row opens its thread in a
+workspace on the VM's herdr server, where `t3t -r <thread>` shows it.
+
+behaviour:
+
+```toml
+[ui.threads]
+url = "http://192.168.1.2:7420"  # plain http only; empty (default) disables everything
+machine = "devvm"                # saved machine label that owns thread workspaces; "" = local server
+command = "t3t -r {thread}"      # pane command; {thread} = thread id
+```
+
+- Data (D39, client only): one background thread per client process holds
+  `GET <url>/api/events` (SSE) and refetches `GET <url>/api/sessions` on
+  connect and whenever the `stamp` data changes. No polling; reconnect with
+  1 s → 30 s backoff; a silent stream is dropped after 10 min. HTTP/1.0 over
+  `std::net::TcpStream`, no new dependency. On failure the last rows stay,
+  dimmed, header `offline`. Text is stripped of control and bidi/format
+  characters and capped; rows whose id is not `[A-Za-z0-9_.:-]{1,128}` are
+  dropped, because the id ends up in a shell command line.
+- Rows: a block under the 0004 pinned row in both expanded sidebars, at most
+  ~2/5 of the sidebar (`… N more` beyond, scrolls with the keyboard cursor).
+  Ticket groups in order of their newest thread, `no ticket` last; herdr's
+  status icons/colours (`running`→working, `blocked`/`error`→blocked, red and
+  bold, with `[blocked]` after the title); agent·model on the right when the
+  sidebar is 28+ cells wide. The thread on the focused pane of the thread
+  machine is highlighted.
+- Mapping (D41, server): every accepted `resume_argv` report appends the
+  joined command to the workspace metadata token `fork.sessions` (one per
+  line, newest last, max 64). The client-shell projection adds the pane's
+  current resume command as agent token `fork.resume`. The client matches
+  both against `command` (program basename, the word after the flag before
+  `{thread}`; so `t3t --server x -r <id>` matches too). Keys contain a dot,
+  which `*.report_metadata` rejects: API callers cannot forge or clear them.
+  Workspace metadata is in-memory, so the mapping dies with the workspace.
+- Hiding: `workspace_entries` drops a workspace whose history names a thread
+  that is in the current list (any machine, by content). When none of its
+  threads is listed any more it is a normal workspace again. Nothing closes.
+- Open (click, or Enter in navigate mode): plan from the thread machine's
+  snapshot. Owner workspace = the one whose history names the thread, else
+  one that names a thread with the same `ticket.id`. Then: a pane whose
+  resume is the thread → focus it (`pane.focus`); else a pane whose resume
+  runs the command's program → restart in place; else add a pane; no owner →
+  new workspace (`cwd` = thread cwd if it exists there, label = ticket label
+  or title). The last three are one `pane.run_command` call. If the machine
+  is not the shown one, the client shows it first (workspace/pane target)
+  and finishes the open on the client timer once its surface is up (20 s
+  limit).
+- `pane.run_command` (new client-shell method, additive): composes
+  `pane.split` next to `replace_pane_id` + `pane.close` of it (in-place
+  restart), or `pane.split` of the workspace's focused pane, or
+  `workspace.create`; then types the command + CR into the new shell (as
+  agent resume restore does) and focuses the pane, which moves the client
+  shell there. One line, no control characters, ≤4 KiB. Older servers do not
+  advertise it; the client then shows "Update and restart it".
+- Keyboard: in navigate mode (`prefix+w`) the rows sit above the first
+  workspace in the up/down cycle: up from the first workspace enters at the
+  last row, down from the last workspace at the first; started on a hidden
+  thread workspace, up/down lands on that thread's row. Enter opens, Esc
+  cancels.
+
+design notes: reading is client-only (D39). The mapping is a server fact
+(guardrail: runtime facts in server state), kept in existing workspace
+metadata so no session or wire struct changes: snapshots are JSON and the
+extra tokens ride in existing `tokens` fields. t3t reports with source
+`t3code-tui`, which `agent_resume::is_official_agent_source` rejects, so
+`agent_session` stays empty for it; the resume argv is the only place the
+thread id lives, hence the projection token. `pane.run_command` exists
+because the client-shell lane has no way to run a command in a pane
+(`pane.send_text`, `agent.start` are not client-shell methods) and a
+multi-step client flow across async endpoint responses would be far larger.
+The in-place restart splits and closes instead of respawning the runtime,
+whose old exit would race the new process. The rows, cursor and pending open
+live in process-wide cells (like 0004's hidden label) so upstream render call
+sites stay untouched.
+
+known gaps: the history is not persisted: after a server restart (or live
+handoff) a workspace only knows the threads its restored panes report again;
+a no-ticket thread that had been switched away from then gets a new
+workspace on its next open. Hiding matches any machine, so a local pane
+reporting a listed thread hides that local workspace too, while rows always
+open on `machine`. Collapsed and mobile sidebars, the navigator and the
+workspace picker show no thread rows. While the cursor is in the rows,
+a snapshot can re-select a workspace in navigate mode, so two rows may look
+selected. The pane added by "add a pane" splits right of the focused pane;
+there is no layout preference. A thread pane that never reported a thread
+(t3t before its first thread) is not recognised as a thread pane.
+
+conflict risk: medium, as 0004: one-line hooks, but `render_sidebar`,
+`render_expanded`, `route_navigate_key`, the mouse handler, the client timer
+arm and `handle_app_event` are hot upstream code; the operations table and
+the frozen method-shape test change when upstream adds methods. On conflict,
+take upstream, re-add the hooks from the table, re-freeze the digest if
+upstream changed a referenced type, and regenerate the schema.
+
+remove when: never upstream; fork feature. Delete with the files and hooks
+above if the thread list is dropped. If upstream adds a pane-command
+client-shell method or exposes resume commands in the projection, switch to
+those and drop the server half.
+
+verification:
+
+```sh
+cargo nextest run --locked threads
+cargo nextest run --locked advertised_client_shell_method_shapes operation_ui_impact generated_protocol_schema
+```
+
+Manual (2026-11-16, debug build, isolated `XDG_CONFIG_HOME`/`XDG_STATE_HOME`
+and `HERDR_SOCKET_PATH`, client in a private tmux server, `machine = ""`, a
+Python stub of tkd's `/api/sessions` + `/api/events`, and a stand-in `t3t`
+script on `PATH` that prints its thread and reports
+`pane.report_agent {source: t3code-tui, agent: t3code, resume_argv: [t3t, -r, id]}`
+like `t3code-tui/src/net/herdr.ts`): click on a thread without workspace →
+new labelled workspace in its cwd, row highlighted, workspace hidden; second
+thread of the same ticket → ticket workspace's pane restarted in place;
+first thread again → restarted back (mapping outlived the pane); thread on
+screen → focus only; after quitting the stand-in → pane added; `prefix+w`,
+Up, Enter → opens; thread dropped from the list → its workspace reappears;
+stub down → rows kept, `offline`; stub up → recovered; server restart →
+history rebuilt from re-reports. Not verified: a real remote machine.
 
 ---
 
