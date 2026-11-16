@@ -402,9 +402,15 @@ pub(crate) fn row_label(row: &ThreadRow, section: Section, now: i64) -> RowLabel
 }
 
 /// Recede (draw dimmed): always while preparing, working or waiting; a ready
-/// or approval row only when it is neither unread nor woke. Never the row on
-/// screen or under the cursor; the caller checks those.
+/// or approval row only when it is neither unread nor woke. The service's
+/// `receded` flag is used when present; it leaves out the Woke term, which
+/// depends on the clock. Never the row on screen or under the cursor; the
+/// caller checks those.
 pub(crate) fn receded(row: &ThreadRow, now: i64) -> bool {
+    let woke_matters = matches!(row.inbox.status, RowStatus::Ready | RowStatus::Approval);
+    if let Some(receded) = row.inbox.receded {
+        return receded && !(woke_matters && is_woke(row, now));
+    }
     match row.inbox.status {
         RowStatus::Preparing | RowStatus::Working | RowStatus::Waiting => true,
         RowStatus::Ready | RowStatus::Approval => !row.inbox.unread && !is_woke(row, now),

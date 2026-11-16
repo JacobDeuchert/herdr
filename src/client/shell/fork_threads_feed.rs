@@ -131,6 +131,8 @@ pub(crate) struct ThreadInbox {
     pub(crate) waiting_since: Option<i64>,
     pub(crate) project_title: String,
     pub(crate) pr: Option<ThreadPr>,
+    /// The service's recede flag, without the clock-dependent Woke term.
+    pub(crate) receded: Option<bool>,
     /// False when the service sent no `inbox` and these fields were derived
     /// from the top-level ones.
     pub(crate) from_service: bool,
@@ -403,6 +405,7 @@ fn parse_inbox(inbox: &serde_json::Map<String, serde_json::Value>) -> ThreadInbo
         waiting_since: time("waiting_since"),
         project_title: text(inbox, "project_title").unwrap_or_default(),
         pr,
+        receded: flag(inbox, "receded"),
         from_service: true,
     }
 }
@@ -1015,6 +1018,7 @@ mod tests {
         );
         assert!(!inbox.goal_active, "wrong types fall back to the default");
         assert!(inbox.unread);
+        assert_eq!(inbox.receded, None);
         assert_eq!(inbox.pin_order_key.as_deref(), Some("a0"));
         assert_eq!(
             inbox.created_at,

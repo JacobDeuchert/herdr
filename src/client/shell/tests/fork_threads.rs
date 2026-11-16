@@ -421,6 +421,19 @@ fn threads_inbox_recede_and_clock() {
             true),
         now
     ));
+    // The service's flag wins, minus Woke for ready rows.
+    let shipped = |status, receded| {
+        with(thread("t", None, status), |inbox| {
+            inbox.receded = Some(receded);
+            inbox.snoozed_until = Some(now - MINUTE);
+        })
+    };
+    assert!(!inbox::receded(&shipped(RowStatus::Working, false), now));
+    assert!(
+        !inbox::receded(&shipped(RowStatus::Ready, true), now),
+        "woke"
+    );
+    assert!(inbox::receded(&shipped(RowStatus::Working, true), now));
 
     // Nothing clock-driven: no deadline.
     assert_eq!(
