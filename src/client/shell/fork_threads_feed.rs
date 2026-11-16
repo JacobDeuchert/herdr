@@ -57,35 +57,6 @@ impl ThreadStatus {
             _ => Self::Unknown,
         }
     }
-
-    /// herdr's own status, for the shared icons and colours. `error` borrows
-    /// `blocked` so it stands out the same way.
-    pub(crate) fn agent_status(self) -> crate::api::schema::AgentStatus {
-        use crate::api::schema::AgentStatus;
-        match self {
-            Self::Idle => AgentStatus::Idle,
-            Self::Running => AgentStatus::Working,
-            Self::Blocked | Self::Error => AgentStatus::Blocked,
-            Self::Done => AgentStatus::Done,
-            Self::Stopped | Self::Unknown => AgentStatus::Unknown,
-        }
-    }
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Running => "running",
-            Self::Blocked => "blocked",
-            Self::Done => "done",
-            Self::Stopped => "stopped",
-            Self::Error => "error",
-            Self::Unknown => "unknown",
-        }
-    }
-
-    pub(crate) fn needs_attention(self) -> bool {
-        matches!(self, Self::Blocked | Self::Error)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,15 +66,95 @@ pub(crate) struct ThreadTicket {
     pub(crate) title: String,
 }
 
+/// Row status of the thread inbox (t3code `resolveSidebarThreadStatus`),
+/// shipped precomputed as `inbox.status`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum RowStatus {
+    Approval,
+    Input,
+    Request,
+    Waiting,
+    Preparing,
+    Working,
+    Limited,
+    Failed,
+    #[default]
+    Ready,
+}
+
+impl RowStatus {
+    fn parse(value: &str) -> Self {
+        match value {
+            "approval" => Self::Approval,
+            "input" => Self::Input,
+            "request" => Self::Request,
+            "waiting" => Self::Waiting,
+            "preparing" => Self::Preparing,
+            "working" => Self::Working,
+            "limited" => Self::Limited,
+            "failed" => Self::Failed,
+            _ => Self::Ready,
+        }
+    }
+
+    /// Statuses that ask for Jacob: drawn in herdr's blocked style.
+    pub(crate) fn needs_attention(self) -> bool {
+        matches!(
+            self,
+            Self::Approval | Self::Input | Self::Request | Self::Limited | Self::Failed
+        )
+    }
+}
+
+/// The `inbox` object of a session: the inputs of the thread inbox rules
+/// (sections, order, row status). Times are Unix milliseconds.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ThreadInbox {
+    pub(crate) listed: bool,
+    pub(crate) pinned: bool,
+    pub(crate) settled: bool,
+    pub(crate) raised_hand: bool,
+    pub(crate) working: bool,
+    pub(crate) snoozed_until: Option<i64>,
+    pub(crate) raised_hand_woke_at: Option<i64>,
+    pub(crate) pin_order_key: Option<String>,
+    pub(crate) created_at: Option<i64>,
+    pub(crate) inbox_sort_at: Option<i64>,
+    pub(crate) working_sort_at: Option<i64>,
+    pub(crate) settled_sort_at: Option<i64>,
+    pub(crate) activity_at: Option<i64>,
+    pub(crate) status: RowStatus,
+    pub(crate) goal_active: bool,
+    pub(crate) unread: bool,
+    pub(crate) last_visited_at: Option<i64>,
+    pub(crate) working_started_at: Option<i64>,
+    pub(crate) waiting_since: Option<i64>,
+    pub(crate) project_title: String,
+    pub(crate) pr: Option<ThreadPr>,
+    /// False when the service sent no `inbox` and these fields were derived
+    /// from the top-level ones.
+    pub(crate) from_service: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ThreadPr {
+    pub(crate) number: Option<u64>,
+    /// `open`, `closed`, `merged`, or empty when unknown.
+    pub(crate) state: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ThreadRow {
     pub(crate) id: String,
     pub(crate) ticket: Option<ThreadTicket>,
+    /// The coarse top-level status (idle|running|blocked|done|stopped|error).
     pub(crate) status: ThreadStatus,
     pub(crate) agent: String,
     pub(crate) model: String,
     pub(crate) title: String,
     pub(crate) cwd: String,
+    pub(crate) branch: String,
+    pub(crate) inbox: ThreadInbox,
 }
 
 impl ThreadRow {
@@ -184,6 +235,11 @@ struct WireSession {
     model: Option<String>,
     title: Option<String>,
     cwd: Option<String>,
+    branch: Option<String>,
+    pending_kind: Option<String>,
+    created_at: Option<serde_json::Value>,
+    updated_at: Option<serde_json::Value>,
+    inbox: Option<serde_json::Value>,
 }
 
 fn ticket_id(value: &serde_json::Value) -> Option<String> {
@@ -195,8 +251,197 @@ fn ticket_id(value: &serde_json::Value) -> Option<String> {
     .filter(|id| !id.is_empty())
 }
 
-/// Parses `GET /api/sessions`: a JSON array, newest first. Unknown fields are
-/// ignored; malformed items and items with unusable ids are skipped.
+/// Days since 1970-01-01 for a proleptic Gregorian date.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let month_index = (month + 9) % 12;
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// RFC 3339 / ISO 8601 date-time (`2026-11-16T10:00:00.123Z`, offsets,
+/// date only) to Unix milliseconds.
+pub(crate) fn parse_iso_millis(value: &str) -> Option<i64> {
+    fn number(text: &str, range: std::ops::Range<usize>) -> Option<i64> {
+        let digits = text.get(range)?;
+        digits
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| digits.parse().ok())?
+    }
+    let text = value.trim();
+    let year = number(text, 0..4)?;
+    let month = number(text, 5..7)?;
+    let day = number(text, 8..10)?;
+    if text.get(4..5)? != "-" || text.get(7..8)? != "-" {
+        return None;
+    }
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let mut rest = &text[10..];
+    let (mut hour, mut minute, mut second, mut millis) = (0, 0, 0, 0);
+    if let Some(time) = rest
+        .strip_prefix('T')
+        .or_else(|| rest.strip_prefix('t'))
+        .or_else(|| rest.strip_prefix(' '))
+    {
+        hour = number(time, 0..2)?;
+        minute = number(time, 3..5)?;
+        if time.get(2..3)? != ":" {
+            return None;
+        }
+        rest = &time[5..];
+        if let Some(seconds) = rest.strip_prefix(':') {
+            second = number(seconds, 0..2)?;
+            rest = &seconds[2..];
+            if let Some(fraction) = rest.strip_prefix('.').or_else(|| rest.strip_prefix(',')) {
+                let digits = fraction.bytes().take_while(u8::is_ascii_digit).count();
+                if digits == 0 {
+                    return None;
+                }
+                let scaled = format!("{:0<3}", &fraction[..digits.min(3)]);
+                millis = scaled.parse().ok()?;
+                rest = &fraction[digits..];
+            }
+        }
+        if hour > 23 || minute > 59 || second > 60 {
+            return None;
+        }
+    }
+    let offset_minutes = match rest {
+        "" | "Z" | "z" => 0,
+        _ => {
+            let sign = match rest.as_bytes()[0] {
+                b'+' => 1,
+                b'-' => -1,
+                _ => return None,
+            };
+            let zone = rest[1..].replace(':', "");
+            let hours = number(&zone, 0..2)?;
+            let minutes = if zone.len() > 2 {
+                number(&zone, 2..4)?
+            } else {
+                0
+            };
+            if zone.len() != 2 && zone.len() != 4 {
+                return None;
+            }
+            sign * (hours * 60 + minutes)
+        }
+    };
+    let days = days_from_civil(year, month, day);
+    let seconds = days * 86_400 + hour * 3_600 + minute * 60 + second - offset_minutes * 60;
+    Some(seconds * 1_000 + millis)
+}
+
+/// A service timestamp: ISO string, or a number of Unix milliseconds.
+fn timestamp(value: Option<&serde_json::Value>) -> Option<i64> {
+    match value? {
+        serde_json::Value::String(text) => parse_iso_millis(text),
+        serde_json::Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_f64().map(|value| value as i64)),
+        _ => None,
+    }
+}
+
+fn flag(inbox: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<bool> {
+    inbox.get(key).and_then(serde_json::Value::as_bool)
+}
+
+fn text(inbox: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+    inbox
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(sanitize_text)
+}
+
+/// Reads the `inbox` object leniently: wrong types count as missing, and
+/// missing fields take their defaults.
+fn parse_inbox(inbox: &serde_json::Map<String, serde_json::Value>) -> ThreadInbox {
+    let time = |key: &str| timestamp(inbox.get(key));
+    let pr = inbox
+        .get("pr")
+        .and_then(serde_json::Value::as_object)
+        .map(|pr| ThreadPr {
+            number: pr.get("number").and_then(serde_json::Value::as_u64),
+            state: text(pr, "state")
+                .filter(|state| matches!(state.as_str(), "open" | "closed" | "merged"))
+                .unwrap_or_default(),
+        });
+    ThreadInbox {
+        listed: flag(inbox, "listed").unwrap_or(true),
+        pinned: flag(inbox, "pinned").unwrap_or(false),
+        settled: flag(inbox, "settled").unwrap_or(false),
+        raised_hand: flag(inbox, "raised_hand").unwrap_or(false),
+        working: flag(inbox, "working").unwrap_or(false),
+        snoozed_until: time("snoozed_until"),
+        raised_hand_woke_at: time("raised_hand_woke_at"),
+        pin_order_key: inbox
+            .get("pin_order_key")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        created_at: time("created_at"),
+        inbox_sort_at: time("inbox_sort_at"),
+        working_sort_at: time("working_sort_at"),
+        settled_sort_at: time("settled_sort_at"),
+        activity_at: time("activity_at"),
+        status: RowStatus::parse(
+            inbox
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+        ),
+        goal_active: flag(inbox, "goal_active").unwrap_or(false),
+        unread: flag(inbox, "unread").unwrap_or(false),
+        last_visited_at: time("last_visited_at"),
+        working_started_at: time("working_started_at"),
+        waiting_since: time("waiting_since"),
+        project_title: text(inbox, "project_title").unwrap_or_default(),
+        pr,
+        from_service: true,
+    }
+}
+
+/// The inbox of a service without the `inbox` object: listed, in no shelf
+/// but Working (top-level `running`), ordered by `updated_at`.
+fn fallback_inbox(
+    status: ThreadStatus,
+    pending_kind: Option<&str>,
+    created_at: Option<i64>,
+    updated_at: Option<i64>,
+) -> ThreadInbox {
+    let row_status = match status {
+        ThreadStatus::Running => RowStatus::Working,
+        ThreadStatus::Blocked
+            if pending_kind.is_some_and(|kind| kind.contains("input") || kind == "question") =>
+        {
+            RowStatus::Input
+        }
+        ThreadStatus::Blocked => RowStatus::Approval,
+        ThreadStatus::Error => RowStatus::Failed,
+        _ => RowStatus::Ready,
+    };
+    ThreadInbox {
+        listed: true,
+        working: status == ThreadStatus::Running,
+        created_at,
+        inbox_sort_at: updated_at,
+        working_sort_at: updated_at,
+        settled_sort_at: updated_at,
+        activity_at: updated_at,
+        status: row_status,
+        unread: status == ThreadStatus::Done,
+        ..ThreadInbox::default()
+    }
+}
+
+/// Parses `GET /api/sessions`: a JSON array. Unknown fields are ignored;
+/// malformed items and items with unusable ids are skipped.
 pub(crate) fn parse_sessions(body: &[u8]) -> Result<Vec<ThreadRow>, String> {
     let items: Vec<serde_json::Value> = serde_json::from_slice(body)
         .map_err(|error| format!("thread list is not a JSON array: {error}"))?;
@@ -224,10 +469,26 @@ pub(crate) fn parse_sessions(body: &[u8]) -> Result<Vec<ThreadRow>, String> {
                 id,
             })
         });
+        let status = ThreadStatus::parse(session.status.as_deref().unwrap_or_default());
+        let created_at = timestamp(session.created_at.as_ref());
+        let mut inbox = match session
+            .inbox
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+        {
+            Some(inbox) => parse_inbox(inbox),
+            None => fallback_inbox(
+                status,
+                session.pending_kind.as_deref(),
+                created_at,
+                timestamp(session.updated_at.as_ref()),
+            ),
+        };
+        inbox.created_at = inbox.created_at.or(created_at);
         rows.push(ThreadRow {
             id,
             ticket,
-            status: ThreadStatus::parse(session.status.as_deref().unwrap_or_default()),
+            status,
             agent: sanitize_text(session.agent.as_deref().unwrap_or_default()),
             model: sanitize_text(session.model.as_deref().unwrap_or_default()),
             title: sanitize_text(session.title.as_deref().unwrap_or_default()),
@@ -235,6 +496,8 @@ pub(crate) fn parse_sessions(body: &[u8]) -> Result<Vec<ThreadRow>, String> {
                 .cwd
                 .filter(|cwd| !cwd.chars().any(char::is_control) && cwd.starts_with('/'))
                 .unwrap_or_default(),
+            branch: sanitize_text(session.branch.as_deref().unwrap_or_default()),
+            inbox,
         });
     }
     Ok(rows)
@@ -687,10 +950,117 @@ mod tests {
         assert_eq!(rows[0].ticket.as_ref().unwrap().label, "PROJ-7");
         assert_eq!(rows[0].cwd, "/home/dev/t1");
         assert_eq!(rows[1].ticket, None);
+        assert_eq!(rows[1].status, ThreadStatus::Running);
+    }
+
+    #[test]
+    fn threads_iso_timestamps_parse_to_unix_millis() {
+        assert_eq!(parse_iso_millis("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(
-            rows[1].status.agent_status(),
-            crate::api::schema::AgentStatus::Working
+            parse_iso_millis("2026-11-16T10:00:00Z"),
+            Some(1_794_823_200_000)
         );
+        assert_eq!(
+            parse_iso_millis("2026-11-16T10:00:00.5Z"),
+            Some(1_794_823_200_500)
+        );
+        assert_eq!(
+            parse_iso_millis("2026-11-16T11:30:00.123456+01:30"),
+            Some(1_794_823_200_123)
+        );
+        assert_eq!(
+            parse_iso_millis("2026-11-16T05:00:00-0500"),
+            Some(1_794_823_200_000)
+        );
+        assert_eq!(parse_iso_millis("2026-11-16"), Some(1_794_787_200_000));
+        assert_eq!(
+            parse_iso_millis("2024-02-29T00:00:00Z"),
+            Some(1_709_164_800_000)
+        );
+        for bad in [
+            "",
+            "yesterday",
+            "2026-13-01T00:00:00Z",
+            "2026-11-16T10:00Q",
+            "2026-11-16T25:00:00Z",
+        ] {
+            assert_eq!(parse_iso_millis(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn threads_parse_sessions_reads_the_inbox_object() {
+        let body = r#"[{
+            "id":"t1","status":"blocked","title":"T","branch":"feat/x","created_at":"2026-11-16T09:00:00Z",
+            "inbox":{
+                "listed":true,"pinned":true,"settled":false,"raised_hand":true,"working":false,
+                "snoozed_until":"2026-11-16T12:00:00Z","raised_hand_woke_at":"2026-11-16T10:00:00Z",
+                "pin_order_key":"a0","inbox_sort_at":1794823200000,"working_sort_at":null,
+                "settled_sort_at":"bogus","activity_at":"2026-11-16T10:00:00Z",
+                "status":"approval","goal_active":"yes","unread":true,
+                "last_visited_at":null,"working_started_at":null,"waiting_since":null,
+                "project_id":"p1","project_title":"Proj \u001b[1mX","pr":{"number":12,"url":"u","state":"merged"},
+                "future_field":{"x":1}
+            }
+        },{"id":"t2","status":"running","updated_at":"2026-11-16T10:00:00Z","inbox":{}}]"#;
+        let rows = parse_sessions(body.as_bytes()).unwrap();
+        let inbox = &rows[0].inbox;
+        assert!(inbox.from_service && inbox.listed && inbox.pinned && inbox.raised_hand);
+        assert_eq!(inbox.status, RowStatus::Approval);
+        assert_eq!(inbox.snoozed_until, Some(1_794_823_200_000 + 2 * 3_600_000));
+        assert_eq!(inbox.inbox_sort_at, Some(1_794_823_200_000));
+        assert_eq!(
+            inbox.settled_sort_at, None,
+            "unparseable times count as missing"
+        );
+        assert!(!inbox.goal_active, "wrong types fall back to the default");
+        assert!(inbox.unread);
+        assert_eq!(inbox.pin_order_key.as_deref(), Some("a0"));
+        assert_eq!(
+            inbox.created_at,
+            Some(1_794_819_600_000),
+            "top-level created_at"
+        );
+        assert_eq!(inbox.project_title, "Proj [1mX");
+        assert_eq!(
+            inbox.pr,
+            Some(ThreadPr {
+                number: Some(12),
+                state: "merged".into()
+            })
+        );
+        assert_eq!(rows[0].branch, "feat/x");
+        // An empty inbox: listed, everything else default.
+        let empty = &rows[1].inbox;
+        assert!(empty.from_service && empty.listed && !empty.working);
+        assert_eq!(empty.status, RowStatus::Ready);
+    }
+
+    #[test]
+    fn threads_parse_sessions_without_inbox_falls_back_to_top_level_fields() {
+        let body = format!(
+            "[{},{},{},{}]",
+            session_json("t1", None, "running"),
+            session_json("t2", None, "blocked")
+                .replace(r#""pending_kind":null"#, r#""pending_kind":"user_input""#),
+            session_json("t3", None, "error"),
+            session_json("t4", None, "done")
+        );
+        let rows = parse_sessions(body.as_bytes()).unwrap();
+        let updated = Some(1_794_823_200_000);
+        for row in &rows {
+            assert!(!row.inbox.from_service && row.inbox.listed);
+            assert!(!row.inbox.pinned && !row.inbox.settled && row.inbox.snoozed_until.is_none());
+            assert_eq!(row.inbox.inbox_sort_at, updated);
+            assert_eq!(row.inbox.activity_at, updated);
+        }
+        assert!(rows[0].inbox.working);
+        assert_eq!(rows[0].inbox.status, RowStatus::Working);
+        assert_eq!(rows[1].inbox.status, RowStatus::Input);
+        assert_eq!(rows[2].inbox.status, RowStatus::Failed);
+        assert_eq!(rows[3].inbox.status, RowStatus::Ready);
+        assert!(rows[3].inbox.unread);
+        assert!(!rows[1].inbox.working);
     }
 
     #[test]
@@ -883,12 +1253,18 @@ mod tests {
 
         *service.body.lock().unwrap() = format!(
             "[{},{}]",
-            session_json("t2", None, "blocked"),
+            session_json("t2", None, "blocked").replace(
+                r#""summary":null"#,
+                r#""summary":null,"inbox":{"listed":true,"settled":true,"status":"input"}"#
+            ),
             session_json("t1", None, "idle")
         );
         service.bump();
         let state = wait_for(|state| state.rows.len() == 2);
         assert_eq!(state.rows[0].id, "t2");
+        assert!(state.rows[0].inbox.from_service && state.rows[0].inbox.settled);
+        assert_eq!(state.rows[0].inbox.status, RowStatus::Input);
+        assert!(!state.rows[1].inbox.from_service);
 
         service.go_down();
         let state = wait_for(|state| state.stale);

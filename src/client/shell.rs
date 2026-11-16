@@ -19,6 +19,7 @@ mod endpoints;
 mod fork_main_agent; // fork: FORK.md 0004
 mod fork_threads; // fork: FORK.md 0005
 mod fork_threads_feed; // fork: FORK.md 0005
+mod fork_threads_inbox; // fork: FORK.md 0005
 pub(super) use endpoints::*;
 mod global_menu;
 mod graphics;

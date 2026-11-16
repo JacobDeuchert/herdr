@@ -169,6 +169,10 @@ impl ClientShellState {
                     }
                     return;
                 }
+                // fork: FORK.md 0005
+                if self.fork_threads_agent_action(action, outcome) {
+                    return;
+                }
                 if self.handle_endpoint_navigation(action, outcome) {
                     return;
                 }

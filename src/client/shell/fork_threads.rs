@@ -2,19 +2,22 @@
 //!
 //! `[ui.threads] url = "http://…"` names a thread service. A background
 //! reader (`fork_threads_feed`) keeps its thread list current; this module
-//! draws it as a block of rows at the top of the expanded sidebar, below the
-//! pinned Main row, grouped by ticket with a "no ticket" group last.
+//! draws it in place of herdr's agents section, below the machines/spaces
+//! list, as t3code's thread inbox (`fork_threads_inbox`): pinned and active
+//! rows, then the Working, Snoozed and Settled shelves. It also takes over
+//! every input the agents section answers to: the `next_agent`,
+//! `previous_agent` and `focus_agent` bindings, clicks, the wheel and the
+//! scrollbar (through the agents section's own hit areas and scroll offset),
+//! and a navigate-mode cursor.
 //!
 //! What the sidebar draws lives in a process-wide view, like the hidden label
 //! of FORK.md 0004, so the upstream render call sites stay untouched. The
 //! client has one shell per process; nextest runs each test in its own.
 
-use super::fork_threads_feed::{ThreadRow, ThreadStatus};
+use super::fork_threads_feed::{RowStatus, ThreadRow};
+use super::fork_threads_inbox::{self as inbox, InboxLine, RowLabel, Section, Shelves};
 use super::*;
 use std::sync::{Arc, LazyLock, RwLock};
-
-/// Smallest sidebar that still gets a thread block.
-const MIN_SIDEBAR_ROWS: u16 = 12;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ClientThreads {
@@ -53,7 +56,7 @@ impl ClientThreads {
     }
 }
 
-/// What the sidebar shows, refreshed from the reader on the client timer.
+/// What the panel shows, refreshed from the reader on the client timer.
 #[derive(Debug, Clone, Default)]
 pub(super) struct ThreadsView {
     pub(super) enabled: bool,
@@ -62,11 +65,23 @@ pub(super) struct ThreadsView {
     pub(super) loaded: bool,
     pub(super) stale: bool,
     pub(super) error: Option<String>,
-    /// Keyboard cursor, an index into `display_order`, while navigating.
+    /// Navigate-mode cursor, an index into the panel's lines.
     pub(super) cursor: Option<usize>,
     pub(super) template: CommandTemplate,
-    /// Ids in `rows`, for hiding workspaces that own a listed thread.
+    /// Ids of listed rows, for hiding workspaces that own a listed thread.
     pub(super) listed: std::collections::HashSet<String>,
+    /// Shelf open/closed state and the Settled page size (client-local).
+    pub(super) shelves: Shelves,
+    /// Scroll the next render so this comes into view.
+    pub(super) reveal: Option<Reveal>,
+    /// When a clock-driven label or section changes next (Unix ms).
+    pub(super) clock_due: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Reveal {
+    Cursor,
+    Thread(String),
 }
 
 static VIEW: LazyLock<RwLock<ThreadsView>> = LazyLock::new(Default::default);
@@ -75,11 +90,18 @@ pub(super) fn view() -> ThreadsView {
     VIEW.read().map(|view| view.clone()).unwrap_or_default()
 }
 
+fn listed_ids(rows: &[ThreadRow]) -> std::collections::HashSet<String> {
+    rows.iter()
+        .filter(|row| row.inbox.listed)
+        .map(|row| row.id.clone())
+        .collect()
+}
+
 /// Test seam: what the reader would have delivered.
 #[cfg(test)]
 pub(super) fn set_view_for_test(rows: Vec<ThreadRow>, stale: bool) {
     if let Ok(mut view) = VIEW.write() {
-        view.listed = rows.iter().map(|row| row.id.clone()).collect();
+        view.listed = listed_ids(&rows);
         view.rows = Arc::new(rows);
         view.loaded = true;
         view.stale = stale;
@@ -105,106 +127,310 @@ pub(super) fn refresh_view() -> bool {
         return false;
     }
     view.generation = Some(feed.generation);
-    view.listed = feed.rows.iter().map(|row| row.id.clone()).collect();
+    view.listed = listed_ids(&feed.rows);
     view.rows = feed.rows;
     view.loaded = feed.loaded;
     view.stale = feed.stale;
     view.error = feed.error;
-    let count = view.rows.len();
-    if let Some(cursor) = view.cursor.as_mut() {
-        if count == 0 {
-            view.cursor = None;
-        } else {
-            *cursor = (*cursor).min(count - 1);
-        }
+    if view.listed.is_empty() {
+        view.cursor = None;
     }
     true
 }
 
-/// One line of the thread block.
+/// Re-evaluates the clock: true when a clock-driven part of the panel (a
+/// snooze ending, a relative time or duration) changed since the last
+/// check. `changed` forces a new deadline after a new list.
+fn clock_tick(now: i64, changed: bool) -> bool {
+    let Ok(mut view) = VIEW.write() else {
+        return false;
+    };
+    let due = view.clock_due.is_some_and(|due| due <= now);
+    if changed || due {
+        view.clock_due = inbox::next_clock_change(&view.rows, now);
+    }
+    due
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ThreadLine {
-    /// Ticket group header; `None` is the "no ticket" group.
-    Group(Option<usize>),
-    /// A thread, by index into the row list.
-    Thread(usize),
-}
-
-/// Lines in display order: ticket groups in order of their newest thread,
-/// threads newest first within a group, the "no ticket" group last.
-pub(super) fn thread_lines(rows: &[ThreadRow]) -> Vec<ThreadLine> {
-    let mut groups: Vec<(Option<&str>, usize, Vec<usize>)> = Vec::new();
-    for (index, row) in rows.iter().enumerate() {
-        let key = row.ticket.as_ref().map(|ticket| ticket.id.as_str());
-        match groups.iter_mut().find(|(group, _, _)| *group == key) {
-            Some((_, _, members)) => members.push(index),
-            None => groups.push((key, index, vec![index])),
-        }
-    }
-    groups.sort_by_key(|(key, _, _)| key.is_none());
-    let mut lines = Vec::new();
-    for (key, first, members) in groups {
-        lines.push(ThreadLine::Group(key.map(|_| first)));
-        lines.extend(members.into_iter().map(ThreadLine::Thread));
-    }
-    lines
-}
-
-/// Row indices in the order the block shows them; the keyboard cursor walks
-/// this list.
-pub(super) fn display_order(rows: &[ThreadRow]) -> Vec<usize> {
-    thread_lines(rows)
-        .into_iter()
-        .filter_map(|line| match line {
-            ThreadLine::Thread(index) => Some(index),
-            ThreadLine::Group(_) => None,
-        })
-        .collect()
+pub(super) enum ThreadHitTarget {
+    Thread(String),
+    Shelf(Section),
+    ShowMore,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ThreadHit {
     pub(super) rect: Rect,
-    pub(super) thread_id: String,
+    pub(super) target: ThreadHitTarget,
 }
 
-/// Rows the block may use: about two fifths of the sidebar, so spaces and
-/// agents keep room.
-fn block_limit(area: Rect) -> u16 {
-    (area.height.saturating_mul(2) / 5).max(4)
+/// The thread on screen, for highlighting and for keeping it visible in a
+/// closed shelf: the thread of the focused pane, when the shown machine is
+/// the thread machine.
+fn shown_for_render(
+    active_snapshot: Option<&ClientShellSnapshot>,
+    config: &ClientShellConfig,
+    endpoints: &[ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+) -> Option<String> {
+    if !config.threads.enabled() {
+        return None;
+    }
+    let endpoint_id = machine_endpoint_id(&config.threads.machine, endpoints)?;
+    if endpoint_id != *active_endpoint_id {
+        return None;
+    }
+    shown_thread(active_snapshot?, &config.threads.template)
 }
 
-/// Draws the thread block at the top of `area` and returns the rest of the
-/// sidebar. Returns `area` unchanged when the feature is off or the sidebar
-/// is too small.
-pub(super) fn render_thread_block(
+/// Sidebar hook, expanded sidebars: draws the thread panel in the agents
+/// section's area. Returns what is left for the agents section: nothing
+/// when the panel was drawn, all of `area` when the feature is off.
+pub(super) fn render_thread_panel(
+    buffer: &mut Buffer,
+    area: Rect,
+    active_snapshot: Option<&ClientShellSnapshot>,
+    config: &ClientShellConfig,
+    state: &mut super::render::ShellRenderState<'_>,
+    hits: &mut ShellHitMap,
+) -> Rect {
+    if !config.threads.enabled() {
+        return area;
+    }
+    let shown = shown_for_render(
+        active_snapshot,
+        config,
+        state.endpoints,
+        state.active_endpoint_id,
+    );
+    render_panel(
+        buffer,
+        area,
+        config,
+        shown.as_deref(),
+        state.agent_scroll,
+        hits,
+    );
+    Rect::new(area.x, area.y, area.width, 0)
+}
+
+/// Sidebar hook, collapsed single-machine sidebar: numbered status icons of
+/// the displayed rows in place of the agents'. Returns the area left for
+/// the agents (none when drawn).
+pub(super) fn render_collapsed_threads(
+    buffer: &mut Buffer,
+    area: Rect,
+    snapshot: &ClientShellSnapshot,
+    config: &ClientShellConfig,
+    hits: &mut ShellHitMap,
+) -> Rect {
+    if !config.threads.enabled() {
+        return area;
+    }
+    let shown = config
+        .threads
+        .machine
+        .is_empty()
+        .then(|| shown_thread(snapshot, &config.threads.template))
+        .flatten();
+    render_collapsed(buffer, area, config, shown.as_deref(), hits);
+    Rect::new(area.x, area.y, area.width, 0)
+}
+
+/// Sidebar hook, collapsed multi-machine sidebar; see
+/// `render_collapsed_threads`.
+pub(super) fn render_collapsed_endpoint_threads(
     buffer: &mut Buffer,
     area: Rect,
     config: &ClientShellConfig,
-    shown_thread: Option<&str>,
+    state: &super::render::ShellRenderState<'_>,
     hits: &mut ShellHitMap,
 ) -> Rect {
-    hits.fork_threads.clear();
-    if !config.threads.enabled() || area.height < MIN_SIDEBAR_ROWS || area.width < 8 {
+    if !config.threads.enabled() {
         return area;
     }
-    let view = view();
-    let palette = &config.palette;
-    let lines = thread_lines(&view.rows);
-    let order = display_order(&view.rows);
-    let cursor_row = view.cursor.and_then(|cursor| order.get(cursor).copied());
-    // Header, lines, and a spacer row.
-    let limit = block_limit(area);
-    let body_rows = (lines.len() as u16).max(1).min(limit.saturating_sub(2));
-    let height = body_rows + 2;
-    // The last column is the sidebar divider.
-    let width = area.width.saturating_sub(1);
+    let active_snapshot = state
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.endpoint_id == *state.active_endpoint_id)
+        .and_then(|endpoint| endpoint.snapshot.as_deref());
+    let shown = shown_for_render(
+        active_snapshot,
+        config,
+        state.endpoints,
+        state.active_endpoint_id,
+    );
+    render_collapsed(buffer, area, config, shown.as_deref(), hits);
+    Rect::new(area.x, area.y, area.width, 0)
+}
 
+fn render_collapsed(
+    buffer: &mut Buffer,
+    area: Rect,
+    config: &ClientShellConfig,
+    shown: Option<&str>,
+    hits: &mut ShellHitMap,
+) {
+    let view = view();
+    let now = inbox::now_millis();
+    let lines = inbox::inbox_lines(&view.rows, now, &view.shelves, shown);
+    let palette = &config.palette;
+    for (number, index) in inbox::displayed_rows(&lines)
+        .into_iter()
+        .take(area.height as usize)
+        .enumerate()
+    {
+        let row = &view.rows[index];
+        let rect = Rect::new(area.x, area.y + number as u16, area.width, 1);
+        let is_shown = shown == Some(row.id.as_str());
+        if is_shown {
+            buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
+        }
+        super::render::put_text(
+            buffer,
+            rect.x,
+            rect.y,
+            rect.width.min(2),
+            &format!("{:<2}", number + 1),
+            Style::default().fg(if is_shown {
+                palette.text
+            } else {
+                palette.overlay0
+            }),
+        );
+        let section = inbox::section(row, now);
+        let (icon, color) = row_icon(row, section, now, config);
+        super::render::put_text(
+            buffer,
+            rect.x.saturating_add(2),
+            rect.y,
+            rect.width.saturating_sub(2),
+            icon,
+            Style::default().fg(if view.stale { palette.overlay0 } else { color }),
+        );
+        if config.mouse_capture {
+            hits.fork_threads.push(ThreadHit {
+                rect,
+                target: ThreadHitTarget::Thread(row.id.clone()),
+            });
+        }
+    }
+}
+
+/// Lines a row takes: cards have a meta line when there is something to put
+/// on it; slim rows, shelves and "Show more" take one.
+fn line_height(line: &InboxLine, rows: &[ThreadRow]) -> u16 {
+    match line {
+        InboxLine::Row { index, section } if !section.slim() => {
+            1 + u16::from(!row_meta(&rows[*index]).is_empty())
+        }
+        _ => 1,
+    }
+}
+
+/// The card's second line: ticket, project, branch, pull request.
+fn row_meta(row: &ThreadRow) -> String {
+    let mut parts = Vec::new();
+    if let Some(ticket) = &row.ticket {
+        parts.push(ticket.label.clone());
+    }
+    if !row.inbox.project_title.is_empty() {
+        parts.push(row.inbox.project_title.clone());
+    }
+    if !row.branch.is_empty() {
+        parts.push(row.branch.clone());
+    }
+    if let Some(pr) = &row.inbox.pr {
+        let number = pr.number.map(|number| format!("#{number}"));
+        let text = match (number, pr.state.is_empty()) {
+            (Some(number), false) => format!("{number} {}", pr.state),
+            (Some(number), true) => number,
+            (None, false) => format!("PR {}", pr.state),
+            (None, true) => String::new(),
+        };
+        if !text.is_empty() {
+            parts.push(text);
+        }
+    }
+    parts.join(" · ")
+}
+
+/// herdr's status icon and colour for a row: approval, input, request,
+/// limited and failed borrow `blocked`; running states `working`; an unread
+/// or woke row `done`; slim rows a neutral dot.
+fn row_icon(
+    row: &ThreadRow,
+    section: Section,
+    now: i64,
+    config: &ClientShellConfig,
+) -> (&'static str, ratatui::style::Color) {
+    use crate::api::schema::AgentStatus;
+    let status = if section.slim() {
+        AgentStatus::Unknown
+    } else {
+        match row.inbox.status {
+            status if status.needs_attention() => AgentStatus::Blocked,
+            RowStatus::Waiting | RowStatus::Preparing | RowStatus::Working => AgentStatus::Working,
+            _ if row.inbox.unread || inbox::is_woke(row, now) => AgentStatus::Done,
+            _ => AgentStatus::Idle,
+        }
+    };
+    (
+        status_icon(status, config.status_indicators),
+        status_color(status, &config.palette),
+    )
+}
+
+fn label_style(label: &RowLabel, palette: &Palette) -> Style {
+    let bold = |color| Style::default().fg(color).add_modifier(Modifier::BOLD);
+    match label {
+        RowLabel::Approval | RowLabel::Limited => bold(palette.peach),
+        RowLabel::Input => bold(palette.mauve),
+        RowLabel::Request => bold(palette.teal),
+        RowLabel::Failed => bold(palette.red),
+        RowLabel::Waiting(_)
+        | RowLabel::SettingUp(_)
+        | RowLabel::Working(_)
+        | RowLabel::Goal(_) => Style::default().fg(palette.yellow),
+        RowLabel::Woke => bold(palette.peach),
+        RowLabel::Done => bold(palette.green),
+        RowLabel::Snoozed(_) | RowLabel::Time(_) | RowLabel::Nothing => {
+            Style::default().fg(palette.overlay0)
+        }
+    }
+}
+
+fn render_panel(
+    buffer: &mut Buffer,
+    area: Rect,
+    config: &ClientShellConfig,
+    shown: Option<&str>,
+    scroll: &mut usize,
+    hits: &mut ShellHitMap,
+) {
+    let palette = &config.palette;
+    if area.height == 0 {
+        return;
+    }
+    // Same header as the agents section: a rule, the title, a blank line.
     super::render::put_text(
         buffer,
         area.x,
         area.y,
-        width,
+        area.width,
+        &"─".repeat(area.width as usize),
+        Style::default().fg(palette.surface_dim),
+    );
+    if area.height < 2 {
+        return;
+    }
+    let mut view = view();
+    super::render::put_text(
+        buffer,
+        area.x,
+        area.y + 1,
+        area.width,
         " threads",
         Style::default()
             .fg(palette.overlay0)
@@ -220,221 +446,246 @@ pub(super) fn render_thread_block(
     if let Some(state) = state {
         super::render::put_right_text(
             buffer,
-            Rect::new(area.x, area.y, width.saturating_sub(1), 1),
-            area.y,
+            Rect::new(area.x, area.y + 1, area.width.saturating_sub(1), 1),
+            area.y + 1,
             state,
             Style::default().fg(palette.overlay0),
         );
     }
-
-    let body = Rect::new(area.x, area.y + 1, width, body_rows);
-    if lines.is_empty() {
-        let text = if view.loaded { " no threads" } else { "" };
-        super::render::put_text(
-            buffer,
-            body.x,
-            body.y,
-            body.width,
-            text,
-            Style::default().fg(palette.overlay0),
-        );
-    } else {
-        let cursor_line = cursor_row.and_then(|row| {
-            lines
-                .iter()
-                .position(|line| *line == ThreadLine::Thread(row))
-        });
-        let visible = body_rows as usize;
-        let offset = cursor_line.map_or(0, |line| (line + 1).saturating_sub(visible));
-        let hidden_below = lines.len().saturating_sub(offset + visible);
-        for (slot, line) in lines.iter().skip(offset).take(visible).enumerate() {
-            let rect = Rect::new(body.x, body.y + slot as u16, body.width, 1);
-            if hidden_below > 0 && slot + 1 == visible && cursor_line != Some(offset + slot) {
-                super::render::put_text(
-                    buffer,
-                    rect.x + 1,
-                    rect.y,
-                    rect.width.saturating_sub(1),
-                    &format!("… {hidden_below} more"),
-                    Style::default().fg(palette.overlay0),
-                );
-                break;
-            }
-            match line {
-                ThreadLine::Group(first) => {
-                    render_group_line(buffer, rect, first.map(|index| &view.rows[index]), palette)
-                }
-                ThreadLine::Thread(index) => {
-                    let row = &view.rows[*index];
-                    let shown = shown_thread == Some(row.id.as_str());
-                    let selected = cursor_row == Some(*index);
-                    render_thread_line(buffer, rect, row, shown, selected, view.stale, config);
-                    if config.mouse_capture {
-                        hits.fork_threads.push(ThreadHit {
-                            rect,
-                            thread_id: row.id.clone(),
-                        });
-                    }
-                }
-            }
-        }
-    }
-    Rect::new(
+    let body = Rect::new(
         area.x,
-        area.y.saturating_add(height),
+        area.y.saturating_add(3),
         area.width,
-        area.height.saturating_sub(height),
-    )
-}
-
-/// Sidebar hook: draws the thread block for whichever sidebar is expanded.
-pub(super) fn render_sidebar_threads(
-    buffer: &mut Buffer,
-    area: Rect,
-    active_snapshot: Option<&ClientShellSnapshot>,
-    config: &ClientShellConfig,
-    state: &super::render::ShellRenderState<'_>,
-    hits: &mut ShellHitMap,
-) -> Rect {
-    let shown = config
-        .threads
-        .enabled()
-        .then(|| {
-            let endpoint_id = machine_endpoint_id(&config.threads.machine, state.endpoints)?;
-            if endpoint_id != *state.active_endpoint_id {
-                return None;
-            }
-            shown_thread(active_snapshot?, &config.threads.template)
-        })
-        .flatten();
-    render_thread_block(buffer, area, config, shown.as_deref(), hits)
-}
-
-fn render_group_line(
-    buffer: &mut Buffer,
-    rect: Rect,
-    first: Option<&ThreadRow>,
-    palette: &Palette,
-) {
-    let ticket = first.and_then(|row| row.ticket.as_ref());
-    let label = ticket.map_or("no ticket", |ticket| ticket.label.as_str());
-    let x = rect.x + 1;
-    super::render::put_text(
-        buffer,
-        x,
-        rect.y,
-        rect.width.saturating_sub(1),
-        label,
-        Style::default()
-            .fg(palette.overlay0)
-            .add_modifier(Modifier::BOLD),
+        area.height.saturating_sub(3),
     );
-    let used = super::render::display_width(label).saturating_add(2);
-    if let Some(title) = ticket
-        .map(|ticket| ticket.title.as_str())
-        .filter(|title| !title.is_empty())
-    {
-        super::render::put_text(
-            buffer,
-            x.saturating_add(used),
-            rect.y,
-            rect.width.saturating_sub(1).saturating_sub(used),
-            title,
-            Style::default().fg(palette.overlay0),
+    hits.agent_body = body;
+    let now = inbox::now_millis();
+    let lines = inbox::inbox_lines(&view.rows, now, &view.shelves, shown);
+    if body.is_empty() || lines.is_empty() {
+        *scroll = 0;
+        if view.loaded && !body.is_empty() {
+            super::render::put_text(
+                buffer,
+                body.x,
+                body.y,
+                body.width,
+                " no threads",
+                Style::default()
+                    .fg(palette.overlay0)
+                    .add_modifier(Modifier::DIM),
+            );
+        }
+        return;
+    }
+    let heights = lines
+        .iter()
+        .map(|line| line_height(line, &view.rows))
+        .collect::<Vec<_>>();
+    let gaps = vec![0; lines.len()];
+    let cursor = view.cursor.filter(|cursor| *cursor < lines.len());
+    let reveal_line = match view.reveal.take() {
+        Some(Reveal::Cursor) => cursor,
+        Some(Reveal::Thread(id)) => lines.iter().position(
+            |line| matches!(line, InboxLine::Row { index, .. } if view.rows[*index].id == id),
+        ),
+        None => None,
+    };
+    if reveal_line.is_some() {
+        update_view(|view| view.reveal = None);
+    }
+    if let Some(target) = reveal_line {
+        *scroll = super::scroll::list_scroll_start_to_reveal(
+            &heights,
+            &gaps,
+            body.height,
+            *scroll,
+            target,
         );
+    }
+    let metrics = super::scroll::list_scroll_metrics(&heights, &gaps, body.height, *scroll);
+    hits.agent_max_scroll = metrics.max_offset_from_bottom;
+    hits.agent_scroll_metrics = Some(metrics);
+    *scroll = metrics
+        .max_offset_from_bottom
+        .saturating_sub(metrics.offset_from_bottom);
+    let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
+    let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
+    // Like t3code, the shelves sit at the bottom when everything fits.
+    let total: u16 = heights.iter().sum();
+    let first_shelf = lines
+        .iter()
+        .position(|line| matches!(line, InboxLine::Shelf { .. }));
+    let shelf_offset = match first_shelf {
+        Some(_) if metrics.max_offset_from_bottom == 0 && total < body.height => {
+            body.height - total
+        }
+        _ => 0,
+    };
+    let mut y = body.y;
+    for (position, line) in lines.iter().enumerate().skip(*scroll) {
+        if Some(position) == first_shelf {
+            y = y.saturating_add(shelf_offset);
+        }
+        let height = heights[position].min(body.height);
+        if y.saturating_add(height) > body.bottom() {
+            break;
+        }
+        let rect = Rect::new(body.x, y, content_width, height);
+        let selected = cursor == Some(position);
+        let target = render_line(buffer, rect, line, &view, shown, selected, now, config);
+        if config.mouse_capture {
+            hits.fork_threads.push(ThreadHit { rect, target });
+        }
+        y = y.saturating_add(height);
+    }
+    if show_scrollbar {
+        let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
+        hits.agent_scrollbar = track;
+        super::scroll::render_list_scrollbar(buffer, track, metrics, palette);
     }
 }
 
-fn render_thread_line(
+#[allow(clippy::too_many_arguments)] // one call site; the arguments are the render inputs
+fn render_line(
     buffer: &mut Buffer,
     rect: Rect,
-    row: &ThreadRow,
-    shown: bool,
+    line: &InboxLine,
+    view: &ThreadsView,
+    shown: Option<&str>,
     selected: bool,
-    stale: bool,
+    now: i64,
     config: &ClientShellConfig,
-) {
+) -> ThreadHitTarget {
     let palette = &config.palette;
     if selected {
         buffer.set_style(rect, Style::default().bg(palette.selection_bg));
-    } else if shown {
+    }
+    let header = Style::default()
+        .fg(palette.overlay0)
+        .add_modifier(Modifier::BOLD);
+    match line {
+        InboxLine::Shelf {
+            section,
+            count,
+            open,
+        } => {
+            let marker = if *open { "▾" } else { "▸" };
+            super::render::put_text(
+                buffer,
+                rect.x,
+                rect.y,
+                rect.width,
+                &format!(" {marker} {} {count}", section.shelf_label()),
+                header,
+            );
+            ThreadHitTarget::Shelf(*section)
+        }
+        InboxLine::ShowMore(count) => {
+            super::render::put_text(
+                buffer,
+                rect.x,
+                rect.y,
+                rect.width,
+                &format!("   Show {count} more"),
+                Style::default().fg(palette.overlay1),
+            );
+            ThreadHitTarget::ShowMore
+        }
+        InboxLine::Row { index, section } => {
+            let row = &view.rows[*index];
+            let is_shown = shown == Some(row.id.as_str());
+            render_row(
+                buffer, rect, row, *section, is_shown, selected, view.stale, now, config,
+            );
+            ThreadHitTarget::Thread(row.id.clone())
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // one call site; the arguments are the render inputs
+fn render_row(
+    buffer: &mut Buffer,
+    rect: Rect,
+    row: &ThreadRow,
+    section: Section,
+    shown: bool,
+    selected: bool,
+    stale: bool,
+    now: i64,
+    config: &ClientShellConfig,
+) {
+    let palette = &config.palette;
+    if shown && !selected {
         buffer.set_style(
             rect,
             Style::default().bg(super::sidebar::workspace_active_background(palette, false)),
         );
     }
-    let status = row.status.agent_status();
-    let dim = palette.overlay0;
-    let icon_color = if stale {
-        dim
-    } else {
-        status_color(status, palette)
-    };
-    let icon = if row.status == ThreadStatus::Stopped {
-        "·"
-    } else {
-        status_icon(status, config.status_indicators)
-    };
+    let (icon, icon_color) = row_icon(row, section, now, config);
     super::render::put_text(
         buffer,
-        rect.x + 2,
+        rect.x + 1,
         rect.y,
         2,
         icon,
         Style::default().fg(icon_color),
     );
-    let attention = row.status.needs_attention();
-    let title_style = if stale {
-        Style::default().fg(dim)
-    } else if attention {
-        Style::default()
-            .fg(palette.red)
-            .add_modifier(Modifier::BOLD)
-    } else if shown || selected {
+    let label = inbox::row_label(row, section, now);
+    let label_text = label.text();
+    let attention = !section.slim() && row.inbox.status.needs_attention();
+    let title_style = if attention || shown || selected {
         Style::default()
             .fg(palette.text)
             .add_modifier(Modifier::BOLD)
+    } else if inbox::receded(row, now) {
+        Style::default().fg(palette.overlay1)
     } else {
         Style::default().fg(palette.subtext0)
     };
-    let title_x = rect.x + 4;
-    let available = rect.right().saturating_sub(title_x).saturating_sub(1);
-    // Agent and model on the right when there is room for both columns.
-    let detail = thread_detail(row);
-    let detail_width = if available >= 28 && !detail.is_empty() {
-        super::render::display_width(&detail).min(available / 3)
+    let title_x = rect.x + 3;
+    let available = rect.right().saturating_sub(title_x);
+    // The status wins over the title, but the title keeps a few cells.
+    let label_width = super::render::display_width(&label_text)
+        .min(available.saturating_sub(8).max(available / 2));
+    let title_width = if label_width > 0 {
+        available.saturating_sub(label_width + 2)
     } else {
-        0
+        available.saturating_sub(1)
     };
-    let title_width = if detail_width > 0 {
-        available.saturating_sub(detail_width + 1)
-    } else {
-        available
-    };
-    let title = if attention {
-        format!("{} [{}]", row.display_title(), row.status.label())
-    } else {
-        row.display_title().to_owned()
-    };
-    super::render::put_text(buffer, title_x, rect.y, title_width, &title, title_style);
-    if detail_width > 0 {
-        let detail = truncate_to_width(&detail, detail_width);
+    super::render::put_text(
+        buffer,
+        title_x,
+        rect.y,
+        title_width,
+        row.display_title(),
+        title_style,
+    );
+    if label_width > 0 {
         super::render::put_right_text(
             buffer,
             Rect::new(rect.x, rect.y, rect.width.saturating_sub(1), 1),
             rect.y,
-            &detail,
-            Style::default().fg(dim),
+            &truncate_to_width(&label_text, label_width),
+            label_style(&label, palette),
         );
     }
-}
-
-fn thread_detail(row: &ThreadRow) -> String {
-    match (row.agent.is_empty(), row.model.is_empty()) {
-        (false, false) => format!("{}·{}", row.agent, row.model),
-        (false, true) => row.agent.clone(),
-        (true, false) => row.model.clone(),
-        (true, true) => String::new(),
+    if rect.height > 1 {
+        super::render::put_text(
+            buffer,
+            rect.x + 3,
+            rect.y + 1,
+            rect.width.saturating_sub(4),
+            &row_meta(row),
+            Style::default().fg(palette.overlay0),
+        );
+    }
+    if stale {
+        buffer.set_style(
+            rect,
+            Style::default()
+                .fg(palette.overlay0)
+                .add_modifier(Modifier::DIM),
+        );
     }
 }
 
@@ -787,13 +1038,16 @@ impl ClientShellState {
         self.push_endpoint_method(crate::api::schema::Method::PaneRunCommand(params), outcome);
     }
 
-    /// Client timer hook: picks up a new thread list and finishes an open
-    /// that waited for its machine.
+    /// Client timer hook: picks up a new thread list, re-evaluates the clock
+    /// (snooze ends, relative times) only when its next change is due, and
+    /// finishes an open that waited for its machine.
     pub(crate) fn fork_threads_tick(&mut self, outcome: &mut ClientShellInput) {
         if !self.config.threads.enabled() {
             return;
         }
-        outcome.repaint |= refresh_view();
+        let changed = refresh_view();
+        let due = clock_tick(inbox::now_millis(), changed);
+        outcome.repaint |= changed || due;
         let ready = {
             let Ok(mut pending) = PENDING.lock() else {
                 return;
@@ -812,23 +1066,127 @@ impl ClientShellState {
         }
     }
 
-    /// Handles a press on a thread row. Returns true when it was one.
+    /// The thread on screen (focused pane of the thread machine), if any.
+    fn fork_threads_shown(&self) -> Option<String> {
+        let threads = &self.config.threads;
+        if machine_endpoint_id(&threads.machine, &self.endpoints)? != self.active_endpoint_id {
+            return None;
+        }
+        shown_thread(self.snapshot.as_deref()?, &threads.template)
+    }
+
+    /// The panel's lines as the sidebar draws them now.
+    fn fork_threads_lines(&self, view: &ThreadsView) -> Vec<InboxLine> {
+        let shown = self.fork_threads_shown();
+        inbox::inbox_lines(
+            &view.rows,
+            inbox::now_millis(),
+            &view.shelves,
+            shown.as_deref(),
+        )
+    }
+
+    /// Runs what a thread panel line does: open a thread, toggle a shelf,
+    /// or show more settled rows.
+    fn fork_threads_activate(&mut self, target: ThreadHitTarget, outcome: &mut ClientShellInput) {
+        match target {
+            ThreadHitTarget::Thread(thread_id) => self.fork_threads_open(&thread_id, outcome),
+            ThreadHitTarget::Shelf(section) => {
+                update_view(|view| view.shelves.toggle(section));
+                outcome.repaint = true;
+            }
+            ThreadHitTarget::ShowMore => {
+                update_view(|view| view.shelves.show_more());
+                outcome.repaint = true;
+            }
+        }
+    }
+
+    /// Handles a press on a thread panel line. Returns true when it was one.
     pub(super) fn fork_threads_click(
         &mut self,
         point: (u16, u16),
         outcome: &mut ClientShellInput,
     ) -> bool {
-        let Some(thread_id) = self
+        let Some(target) = self
             .hits
             .fork_threads
             .iter()
             .find(|hit| super::contains(hit.rect, point))
-            .map(|hit| hit.thread_id.clone())
+            .map(|hit| hit.target.clone())
         else {
             return false;
         };
-        self.fork_threads_open(&thread_id, outcome);
+        self.fork_threads_activate(target, outcome);
         true
+    }
+
+    /// Key binding hook: with the thread panel in place of the agents
+    /// section, `next_agent` / `previous_agent` step through the displayed
+    /// thread rows (wrapping, from the thread on screen) and `focus_agent N`
+    /// takes the Nth; each opens its thread like a click. Returns true when
+    /// it handled `action`.
+    pub(super) fn fork_threads_agent_action(
+        &mut self,
+        action: crate::input::KeybindAction,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        use crate::input::KeybindAction;
+        if !self.config.threads.enabled()
+            || !matches!(
+                action,
+                KeybindAction::PreviousAgent
+                    | KeybindAction::NextAgent
+                    | KeybindAction::FocusAgent(_)
+            )
+        {
+            return false;
+        }
+        let view = view();
+        let rows = inbox::displayed_rows(&self.fork_threads_lines(&view));
+        if rows.is_empty() {
+            return true;
+        }
+        let next = match action {
+            KeybindAction::FocusAgent(index) if index < rows.len() => index,
+            KeybindAction::FocusAgent(_) => return true,
+            _ => {
+                let shown = self.fork_threads_shown();
+                let current = rows
+                    .iter()
+                    .position(|index| Some(view.rows[*index].id.as_str()) == shown.as_deref());
+                match (current, action) {
+                    (Some(index), KeybindAction::PreviousAgent) => {
+                        (index + rows.len() - 1) % rows.len()
+                    }
+                    (Some(index), _) => (index + 1) % rows.len(),
+                    (None, KeybindAction::PreviousAgent) => rows.len() - 1,
+                    (None, _) => 0,
+                }
+            }
+        };
+        let thread_id = view.rows[rows[next]].id.clone();
+        update_view(|view| view.reveal = Some(Reveal::Thread(thread_id.clone())));
+        self.fork_threads_open(&thread_id, outcome);
+        outcome.repaint = true;
+        true
+    }
+
+    /// `focus_agent N` exists while the panel shows at least N thread rows.
+    /// `None` when the agents section is not replaced.
+    pub(super) fn fork_threads_target_exists(
+        &self,
+        binding: &crate::input::KeybindMatch,
+    ) -> Option<bool> {
+        use crate::input::{KeybindAction, KeybindMatch};
+        let KeybindMatch::Action(KeybindAction::FocusAgent(index)) = binding else {
+            return None;
+        };
+        if !self.config.threads.enabled() {
+            return None;
+        }
+        let view = view();
+        Some(*index < inbox::displayed_rows(&self.fork_threads_lines(&view)).len())
     }
 
     /// Workspaces the navigate cursor can reach, as `(endpoint, workspace)`,
@@ -859,35 +1217,25 @@ impl ClientShellState {
             .collect()
     }
 
-    /// Position in `display_order` of the thread on screen, if any.
-    fn fork_threads_shown_position(&self, rows: &[ThreadRow]) -> Option<usize> {
-        let threads = &self.config.threads;
-        if machine_endpoint_id(&threads.machine, &self.endpoints)? != self.active_endpoint_id {
-            return None;
-        }
-        let shown = shown_thread(self.snapshot.as_deref()?, &threads.template)?;
-        display_order(rows)
-            .iter()
-            .position(|index| rows[*index].id == shown)
-    }
-
-    /// Navigate-mode hook. The thread rows join the workspace cycle above
-    /// the first workspace: the workspace up/down keys move into and through
-    /// them, Enter opens the selected thread. Returns true when it handled
-    /// `key`.
+    /// Navigate-mode hook. The panel's lines join the workspace cycle after
+    /// the last workspace, as the panel sits below the workspace list: the
+    /// workspace up/down keys move into and through them; Enter opens a
+    /// thread, opens or closes a shelf, or shows more settled rows. Returns
+    /// true when it handled `key`.
     pub(super) fn fork_threads_navigate_key(
         &mut self,
         key: &crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) -> bool {
         let view = view();
-        let count = display_order(&view.rows).len();
+        let lines = if self.config.threads.enabled() {
+            self.fork_threads_lines(&view)
+        } else {
+            Vec::new()
+        };
+        let count = lines.len();
         let clear = || update_view(|view| view.cursor = None);
-        if !self.config.threads.enabled()
-            || count == 0
-            || self.sidebar_collapsed
-            || self.mobile_layout_active()
-        {
+        if count == 0 || self.sidebar_collapsed || self.mobile_layout_active() {
             if view.cursor.is_some() {
                 clear();
             }
@@ -898,26 +1246,37 @@ impl ClientShellState {
         let down = navigate.workspace_down.matches_direct_key(key);
         let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
         let enter = code == KeyCode::Enter && modifiers.is_empty();
-        let set = |cursor: Option<usize>| update_view(|view| view.cursor = cursor);
-        match view.cursor {
-            Some(cursor) if up && cursor > 0 => set(Some(cursor - 1)),
-            Some(cursor) if down && cursor + 1 < count => set(Some(cursor + 1)),
+        let set = |cursor: usize| {
+            update_view(|view| {
+                view.cursor = Some(cursor);
+                view.reveal = Some(Reveal::Cursor);
+            })
+        };
+        match view.cursor.map(|cursor| cursor.min(count - 1)) {
+            Some(cursor) if up && cursor > 0 => set(cursor - 1),
+            Some(cursor) if down && cursor + 1 < count => set(cursor + 1),
             Some(_) if up || down => {
-                set(None);
+                clear();
                 self.navigate_workspace_id = None;
                 self.move_navigate_workspace(if up { -1 } else { 1 });
             }
             Some(cursor) if enter => {
-                set(None);
-                self.mode = self.copy_or_terminal_mode();
-                self.navigate_workspace_id = None;
-                if let Some(index) = display_order(&view.rows).get(cursor) {
-                    let thread_id = view.rows[*index].id.clone();
-                    self.fork_threads_open(&thread_id, outcome);
+                let target = match lines[cursor] {
+                    InboxLine::Row { index, .. } => {
+                        ThreadHitTarget::Thread(view.rows[index].id.clone())
+                    }
+                    InboxLine::Shelf { section, .. } => ThreadHitTarget::Shelf(section),
+                    InboxLine::ShowMore(_) => ThreadHitTarget::ShowMore,
+                };
+                if matches!(target, ThreadHitTarget::Thread(_)) {
+                    clear();
+                    self.mode = self.copy_or_terminal_mode();
+                    self.navigate_workspace_id = None;
                 }
+                self.fork_threads_activate(target, outcome);
             }
             Some(_) => {
-                set(None);
+                clear();
                 return false;
             }
             None => {
@@ -929,16 +1288,23 @@ impl ClientShellState {
                 let cursor = match &current {
                     // Navigation started on a thread workspace, which the
                     // list hides: start on that thread's row.
-                    Some(current) if (up || down) && !targets.contains(current) => self
-                        .fork_threads_shown_position(&view.rows)
-                        .unwrap_or(if up { count - 1 } else { 0 }),
+                    Some(current) if (up || down) && !targets.contains(current) => {
+                        let shown = self.fork_threads_shown();
+                        lines
+                            .iter()
+                            .position(|line| {
+                                matches!(line, InboxLine::Row { index, .. }
+                                    if Some(view.rows[*index].id.as_str()) == shown.as_deref())
+                            })
+                            .unwrap_or(if up { count - 1 } else { 0 })
+                    }
+                    _ if down && (targets.is_empty() || current.as_ref() == targets.last()) => 0,
                     _ if up && (targets.is_empty() || current.as_ref() == targets.first()) => {
                         count - 1
                     }
-                    _ if down && (targets.is_empty() || current.as_ref() == targets.last()) => 0,
                     _ => return false,
                 };
-                set(Some(cursor));
+                set(cursor);
                 self.navigate_workspace_id = None;
             }
         }

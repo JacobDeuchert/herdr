@@ -206,6 +206,14 @@ pub(super) fn render_collapsed(
             Style::default().fg(palette.surface_dim),
         );
     }
+    // fork: FORK.md 0005
+    let detail_area = super::fork_threads::render_collapsed_endpoint_threads(
+        buffer,
+        detail_area,
+        config,
+        state,
+        hits,
+    );
     super::endpoint_agents::render_collapsed(
         buffer,
         detail_area,
@@ -255,15 +263,6 @@ pub(super) fn render_expanded(
         ),
         state.active_endpoint_id.is_local(),
         config,
-        hits,
-    );
-    // fork: FORK.md 0005
-    let area = super::fork_threads::render_sidebar_threads(
-        buffer,
-        area,
-        active_snapshot,
-        config,
-        state,
         hits,
     );
     hits.sidebar_divider = if area.is_empty() {
@@ -575,6 +574,15 @@ pub(super) fn render_expanded(
             }),
         );
     }
+    // fork: FORK.md 0005
+    let detail_area = super::fork_threads::render_thread_panel(
+        buffer,
+        detail_area,
+        active_snapshot,
+        config,
+        state,
+        hits,
+    );
     super::endpoint_agents::render_expanded(
         buffer,
         detail_area,

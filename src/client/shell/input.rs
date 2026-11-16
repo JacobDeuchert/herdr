@@ -992,6 +992,10 @@ impl ClientShellState {
     ) -> bool {
         use crate::input::{KeybindAction, KeybindMatch};
 
+        // fork: FORK.md 0005
+        if let Some(exists) = self.fork_threads_target_exists(binding) {
+            return exists;
+        }
         match binding {
             KeybindMatch::Action(KeybindAction::SwitchWorkspace(index)) => {
                 self.snapshot.as_deref().is_some_and(|snapshot| {

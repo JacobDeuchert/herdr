@@ -127,6 +127,14 @@ pub(crate) fn render_collapsed_sidebar(
         detail_area.width,
         detail_area.height.saturating_sub(1),
     );
+    // fork: FORK.md 0005
+    let detail_content = crate::client::shell::fork_threads::render_collapsed_threads(
+        buffer,
+        detail_content,
+        snapshot,
+        config,
+        hits,
+    );
     for (index, pane_id) in super::ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
         .into_iter()
         .take(detail_content.height as usize)
@@ -213,15 +221,6 @@ pub(crate) fn render_sidebar(
         Some(snapshot),
         state.active_endpoint_id.is_local(),
         config,
-        hits,
-    );
-    // fork: FORK.md 0005
-    let area = crate::client::shell::fork_threads::render_sidebar_threads(
-        buffer,
-        area,
-        Some(snapshot),
-        config,
-        state,
         hits,
     );
     hits.sidebar_divider = if area.is_empty() {
@@ -448,6 +447,15 @@ pub(crate) fn render_sidebar(
         }
     }
 
+    // fork: FORK.md 0005
+    let detail_area = crate::client::shell::fork_threads::render_thread_panel(
+        buffer,
+        detail_area,
+        Some(snapshot),
+        config,
+        state,
+        hits,
+    );
     super::render_agent_panel(
         buffer,
         detail_area,
