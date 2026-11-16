@@ -1061,6 +1061,24 @@ impl App {
                     },
                 );
             }
+            // fork: FORK.md 0004. Only a server has clients.
+            Method::ClientMainAgentShow(_) => {
+                return responses::encode_success(
+                    request.id,
+                    ResponseResult::ClientMainAgentShow { sent: false },
+                );
+            }
+            Method::ClientViewGet(_) => {
+                return responses::encode_success(
+                    request.id,
+                    ResponseResult::ClientView {
+                        attached: false,
+                        active: false,
+                        workspace_id: None,
+                        workspace_label: None,
+                    },
+                );
+            }
             Method::SessionSnapshot(_) => return self.handle_session_snapshot(request.id),
             Method::WorkspaceList(_) => return self.handle_workspace_list(request.id),
             Method::WorkspaceGet(target) => return self.handle_workspace_get(request.id, target),

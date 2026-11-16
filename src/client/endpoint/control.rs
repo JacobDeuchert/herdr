@@ -11,6 +11,8 @@ pub(crate) enum EndpointControlMessage {
     AgentViewProjection(DecodedAgentViewProjection),
     AgentCompletions(crate::protocol::endpoint::EndpointAgentCompletions),
     Snapshot(Box<crate::protocol::ClientShellSnapshot>),
+    // fork: FORK.md 0004
+    MainAgentShow,
     Ignored,
 }
 
@@ -20,6 +22,10 @@ pub(crate) fn decode_endpoint_control(
 ) -> Result<EndpointControlMessage, String> {
     if kind == crate::protocol::endpoint::HEALTH_PONG_KIND {
         return Ok(EndpointControlMessage::HealthPong);
+    }
+    // fork: FORK.md 0004
+    if kind == crate::protocol::endpoint::FORK_MAIN_AGENT_SHOW_KIND {
+        return Ok(EndpointControlMessage::MainAgentShow);
     }
     if kind == crate::protocol::endpoint::AGENT_COMPLETIONS_KIND {
         return Ok(serde_json::from_str(data)

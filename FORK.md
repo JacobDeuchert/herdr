@@ -272,6 +272,9 @@ local files (new, fork-only):
 - `src/config/fork_main_agent.rs` — `MainAgentConfig`
 - `src/client/shell/fork_main_agent.rs` — hiding, pinned row, toggle, click
 - `src/client/shell/tests/fork_main_agent.rs`
+- `src/server/headless/fork_main_agent.rs` — `client.main_agent.show`, `client.view.get`
+- `src/server/headless/tests/fork_main_agent.rs`
+- `src/cli/fork_main_agent.rs` — `herdr main-agent show|view`
 
 touched upstream files (each hook is marked `// fork: FORK.md 0004`):
 
@@ -287,6 +290,16 @@ touched upstream files (each hook is marked `// fork: FORK.md 0004`):
 | `src/client/shell/mouse.rs` | left press, just before the workspace `group_toggle` lookup | `fork_main_agent_click` |
 | `src/client/shell/input.rs` | `ClientShellMode::Terminal` before `resolve_direct_binding`; `ClientShellMode::Prefix` before `resolve_prefix_binding` | `fork_main_agent_key` |
 | `src/client/shell/tests/mod.rs` | test `mod` list | `mod fork_main_agent;` |
+| `src/api/schema.rs` | `define_operations!`, after `ClientWindowTitleClear` | `ClientMainAgentShow`, `ClientViewGet` |
+| `src/api/schema/response.rs` | `ResponseResult`, after `ClientWindowTitle` | `ClientMainAgentShow`, `ClientView` |
+| `src/app/api.rs` | app-mode `match`, before `SessionSnapshot` | both answer "no client" |
+| `src/protocol/endpoint.rs` | after `AGENT_COMPLETIONS_KIND` | `FORK_MAIN_AGENT_SHOW_KIND` |
+| `src/client/endpoint/control.rs` | `EndpointControlMessage`; top of `decode_endpoint_control` | `MainAgentShow` variant and decode |
+| `src/client/mod.rs` | `EndpointControl` arm, before `EndpointControlMessage::Ignored` | `fork_main_agent_show_from_server` + `finish_client_shell_input` |
+| `src/server/headless.rs` | `mod` list; `match` after `ClientWindowTitleClear` | `mod fork_main_agent;`, dispatch both methods |
+| `src/server/headless/tests/mod.rs` | test `mod` list | `mod fork_main_agent;` |
+| `src/cli.rs` | `mod` list; top-level `match command` | `"main-agent"` |
+| `docs/next/api/herdr-api.schema.json` | generated | `HERDR_UPDATE_API_SCHEMA=1 just test-one generated_protocol_schema_artifact_is_current` |
 
 reason: D36 in workflow-hub. The shared herdr app on the host holds Main (the
 Hermes TUI) as a permanent, pinned sidebar entry above the machines and
@@ -310,6 +323,17 @@ key = "prefix+m"     # toggle; empty leaves it unbound
 - Click or `key` while elsewhere: remember `(endpoint, workspace)` and
   `focus_or_activate(Local, Workspace(main))`, so it also switches away from a
   remote machine. `key` on Main: return to the remembered place.
+- `herdr main-agent show` (API `client.main_agent.show`): the local server
+  forwards an endpoint control (`fork.main-agent.show.v1`) to its client
+  shell, which shows Main like a click does: never toggles away, and works
+  while the client shows another machine (endpoint controls pass even for
+  inactive endpoints). Only the local endpoint's control is honoured.
+  Returns `sent: false` when no client shell is connected.
+- `herdr main-agent view` (API `client.view.get`): `attached`, `active`
+  (the client presents this server, not another machine) and the
+  `workspace_id` / `workspace_label` of the client's view on this server.
+  Main is showing when `active` and the label is Main. Read from server
+  state, no round trip to the client.
 - Missing workspace: an `Unavailable` notice, nothing else. herdr never
   creates or restarts it; the `local.main-agent` plugin in nixos-work does
   that over the CLI.
@@ -317,7 +341,12 @@ key = "prefix+m"     # toggle; empty leaves it unbound
   only (not in copy mode, navigate or resize). It is not part of `[keys]`, so
   `herdr config check`, the keybinding help and the settings UI do not list it.
 
-design notes: client-only, no protocol or server change. The hidden label is
+design notes: the row, hiding and key are client-only. The CLI/API half
+(added 2026-11-16) needs the server: SUPER+G used to send the key into the
+window and read the outer window title to know whether Main showed, but in
+the multi-machine client that title stayed the default `herdr`, so SUPER+G
+on Main toggled away from it. The new API kinds are additive; an older
+client ignores the unknown control. The hidden label is
 a process-wide `RwLock<String>` set whenever the client config is built,
 instead of a new `workspace_entries` parameter, so the eleven upstream call
 sites stay untouched. Matching is by label on every endpoint: a remote
@@ -343,6 +372,12 @@ verification:
 ```sh
 cargo nextest run --locked main_agent
 ```
+
+Manual (2026-11-16, debug build, isolated XDG dirs and socket, client in a
+tmux pane, a throwaway `--remote-session` on devvm as second machine):
+`show` from another workspace and from the VM lands on Main, `show` on Main
+stays, `prefix+m` returns (also to the VM), `view` reports `active: false`
+while the VM is shown.
 
 ---
 

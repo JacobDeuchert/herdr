@@ -202,6 +202,18 @@ pub enum ResponseResult {
         changed: bool,
         reason: ClientWindowTitleReason,
     },
+    // fork: FORK.md 0004
+    ClientMainAgentShow {
+        sent: bool,
+    },
+    ClientView {
+        /// A client shell is connected to this server.
+        attached: bool,
+        /// That client is presenting this server, not another machine.
+        active: bool,
+        workspace_id: Option<String>,
+        workspace_label: Option<String>,
+    },
     IntegrationList {
         integrations: Vec<super::integrations::IntegrationInfo>,
     },

@@ -227,6 +227,16 @@ impl ClientShellState {
         );
     }
 
+    /// `herdr main-agent show` (server `client.main_agent.show`): show Main,
+    /// never toggle away from it. Lets a window-manager key focus the herdr
+    /// window and show Main without knowing what the client is showing.
+    pub(crate) fn fork_main_agent_show_from_server(&mut self) -> ClientShellInput {
+        let mut outcome = ClientShellInput::default();
+        self.fork_main_agent_focus(&mut outcome);
+        outcome.repaint = true;
+        outcome
+    }
+
     /// Toggle: Main when elsewhere, back to the remembered place when on Main.
     pub(super) fn fork_main_agent_toggle(&mut self, outcome: &mut ClientShellInput) {
         if !self.fork_main_agent_is_shown() {

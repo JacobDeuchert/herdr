@@ -77,6 +77,7 @@ use crate::server::terminal_attach::paste_payload_for_runtime;
 mod bootstrap;
 mod client_views;
 mod endpoint_requests;
+mod fork_main_agent; // fork: FORK.md 0004
 mod lifecycle;
 mod native_graphics;
 mod notifications;
@@ -2971,6 +2972,17 @@ impl HeadlessServer {
             }
             api::schema::Method::ClientWindowTitleClear(_) => {
                 let response = self.handle_client_window_title_api(msg.request.id.clone(), None);
+                let _ = msg.respond_to.send(response);
+                return true;
+            }
+            // fork: FORK.md 0004
+            api::schema::Method::ClientMainAgentShow(_) => {
+                let response = self.handle_client_main_agent_show_api(msg.request.id.clone());
+                let _ = msg.respond_to.send(response);
+                return true;
+            }
+            api::schema::Method::ClientViewGet(_) => {
+                let response = self.handle_client_view_get_api(msg.request.id.clone());
                 let _ = msg.respond_to.send(response);
                 return true;
             }

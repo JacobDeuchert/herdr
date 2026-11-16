@@ -56,6 +56,9 @@ operations::define_operations! {
     CommandInvoke(CommandInvokeParams) => "command.invoke", true, true;
     ClientWindowTitleSet(ClientWindowTitleSetParams) => "client.window_title.set", false, false;
     ClientWindowTitleClear(EmptyParams) => "client.window_title.clear", false, false;
+    // fork: FORK.md 0004
+    ClientMainAgentShow(EmptyParams) => "client.main_agent.show", false, false;
+    ClientViewGet(EmptyParams) => "client.view.get", false, false;
     ClientShellSurfaceSet(ClientShellSurfaceSetParams) => "client_shell.surface.set", false, true;
     SessionSnapshot(EmptyParams) => "session.snapshot", false, false;
     WorkspaceCreate(WorkspaceCreateParams) => "workspace.create", true, true;

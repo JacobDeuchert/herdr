@@ -38,7 +38,10 @@ fn main_state(focused: &str, with_main: bool) -> ClientShellState {
 
 fn focused_workspace_request(outcome: &ClientShellInput) -> String {
     let [ClientShellAction::Endpoint { request, .. }] = outcome.actions.as_slice() else {
-        panic!("expected one workspace focus request, got {:?}", outcome.actions);
+        panic!(
+            "expected one workspace focus request, got {:?}",
+            outcome.actions
+        );
     };
     let crate::api::schema::Method::WorkspaceFocus(target) = &request.method else {
         panic!("expected workspace focus, got {:?}", request.method);
@@ -115,4 +118,16 @@ fn main_agent_disabled_by_default_changes_nothing() {
     state.compose(100, 28).unwrap();
     assert!(state.hits.fork_main_agent.is_none());
     assert_eq!(state.hits.workspaces.len(), 3);
+}
+
+#[test]
+fn main_agent_show_from_server_focuses_main_and_never_toggles_back() {
+    let mut state = main_state("ws_1", true);
+    let outcome = state.fork_main_agent_show_from_server();
+    assert_eq!(focused_workspace_request(&outcome), "ws_2");
+
+    // Already on Main: `herdr main-agent show` must leave it there.
+    state.set_snapshot(Box::new(main_snapshot("ws_2", true)));
+    let outcome = state.fork_main_agent_show_from_server();
+    assert!(outcome.actions.is_empty(), "{:?}", outcome.actions);
 }

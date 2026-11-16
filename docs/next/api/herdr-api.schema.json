@@ -4892,6 +4892,38 @@
         {
           "properties": {
             "method": {
+              "const": "client.main_agent.show",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "client.view.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "client_shell.surface.set",
               "type": "string"
             },
@@ -10006,6 +10038,56 @@
                 "type",
                 "changed",
                 "reason"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "sent": {
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "client_main_agent_show",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "sent"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "active": {
+                  "description": "That client is presenting this server, not another machine.",
+                  "type": "boolean"
+                },
+                "attached": {
+                  "description": "A client shell is connected to this server.",
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "client_view",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "workspace_label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "attached",
+                "active"
               ],
               "type": "object"
             },
