@@ -53,6 +53,8 @@ pub(crate) struct ClientShellConfig {
     pub(super) startup_onboarding: bool,
     // fork: FORK.md 0004
     pub(super) main_agent: super::fork_main_agent::ClientMainAgent,
+    // fork: FORK.md 0005
+    pub(super) threads: super::fork_threads::ClientThreads,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +89,8 @@ pub(super) enum ClientMobileTarget {
 pub(super) struct ShellHitMap {
     // fork: FORK.md 0004
     pub(super) fork_main_agent: Option<super::fork_main_agent::MainAgentHit>,
+    // fork: FORK.md 0005
+    pub(super) fork_threads: Vec<super::fork_threads::ThreadHit>,
     pub(super) machines: Vec<MachineHit>,
     pub(super) workspaces: Vec<WorkspaceHit>,
     pub(super) workspace_body: Rect,

@@ -253,6 +253,7 @@ mod copy;
 mod endpoint_requests;
 mod endpoints;
 mod fork_main_agent; // fork: FORK.md 0004
+mod fork_threads; // fork: FORK.md 0005
 mod graphics;
 mod input_conformance;
 #[path = "input.rs"]

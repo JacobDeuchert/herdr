@@ -257,6 +257,15 @@ pub(super) fn render_expanded(
         config,
         hits,
     );
+    // fork: FORK.md 0005
+    let area = super::fork_threads::render_sidebar_threads(
+        buffer,
+        area,
+        active_snapshot,
+        config,
+        state,
+        hits,
+    );
     hits.sidebar_divider = if area.is_empty() {
         Rect::default()
     } else {

@@ -162,6 +162,8 @@ impl ClientShellConfig {
             // fork: FORK.md 0004
             main_agent: super::fork_main_agent::ClientMainAgent::from_config(&config.ui.main_agent)
                 .0,
+            // fork: FORK.md 0005
+            threads: super::fork_threads::ClientThreads::from_config(&config.ui.threads).0,
         }
     }
 
@@ -373,6 +375,11 @@ impl ClientShellConfig {
                 let (main_agent, diagnostic) =
                     super::fork_main_agent::ClientMainAgent::from_config(&ui.main_agent);
                 self.main_agent = main_agent;
+                diagnostics.extend(diagnostic);
+                // fork: FORK.md 0005
+                let (threads, diagnostic) =
+                    super::fork_threads::ClientThreads::from_config(&ui.threads);
+                self.threads = threads;
                 diagnostics.extend(diagnostic);
             }
         }

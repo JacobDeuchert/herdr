@@ -1009,6 +1009,8 @@ pub struct UiConfig {
     pub sound: SoundConfig,
     /// fork: pinned Main agent row (FORK.md 0004).
     pub main_agent: super::fork_main_agent::MainAgentConfig,
+    /// fork: agent thread list in the sidebar (FORK.md 0005).
+    pub threads: super::fork_threads::ThreadsConfig,
 }
 
 /// Cursor shape (DECSCUSR) used for the forced IME anchor.
@@ -1233,6 +1235,7 @@ impl Default for UiConfig {
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
             main_agent: Default::default(),
+            threads: Default::default(),
         }
     }
 }

@@ -215,6 +215,15 @@ pub(crate) fn render_sidebar(
         config,
         hits,
     );
+    // fork: FORK.md 0005
+    let area = crate::client::shell::fork_threads::render_sidebar_threads(
+        buffer,
+        area,
+        Some(snapshot),
+        config,
+        state,
+        hits,
+    );
     hits.sidebar_divider = if area.is_empty() {
         Rect::default()
     } else {
