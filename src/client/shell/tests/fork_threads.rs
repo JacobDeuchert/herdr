@@ -656,6 +656,18 @@ fn threads_panel_expands_the_inbox_by_click() {
 }
 
 #[test]
+fn threads_panel_header_counts_open_threads_right_aligned() {
+    let mut threads = sample_threads();
+    threads.push(with(thread("t5", None, RowStatus::Ready), |inbox| {
+        inbox.settled = true
+    }));
+    fork_threads::set_view_for_test(threads, false);
+    let (_, rows) = render(threads_config(""));
+    let header = rows[line_of(&rows, "threads")].trim_end_matches(['│', ' ']);
+    assert!(header.ends_with(" 4"), "settled t5 not counted: {header:?}");
+}
+
+#[test]
 fn threads_panel_marks_stale_rows_offline() {
     fork_threads::set_view_for_test(sample_threads(), true);
     let (_, rows) = render(threads_config(""));

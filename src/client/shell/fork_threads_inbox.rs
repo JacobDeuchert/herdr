@@ -126,6 +126,14 @@ pub(crate) fn section(row: &ThreadRow, now: i64) -> Section {
     }
 }
 
+/// Open threads: listed and not settled (inbox, Working and Snoozed),
+/// the count beside the panel's " threads" header.
+pub(crate) fn open_count(rows: &[ThreadRow], now: i64) -> usize {
+    rows.iter()
+        .filter(|row| row.inbox.listed && section(row, now) != Section::Settled)
+        .count()
+}
+
 /// `threadWokeAt` with the clock-dependent half done here: the service's
 /// raised-hand wake time, else the snooze end once it has passed.
 pub(crate) fn woke_at(row: &ThreadRow, now: i64) -> Option<i64> {

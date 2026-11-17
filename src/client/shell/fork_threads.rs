@@ -441,10 +441,14 @@ fn render_panel(
             .fg(palette.overlay0)
             .add_modifier(Modifier::BOLD),
     );
+    let now = inbox::now_millis();
+    // Right of the title: the load state, else the open-thread count.
     let state = if !view.loaded && view.error.is_none() {
-        Some("loading")
+        Some("loading".to_string())
     } else if view.stale {
-        Some("offline")
+        Some("offline".to_string())
+    } else if view.loaded {
+        Some(inbox::open_count(&view.rows, now).to_string())
     } else {
         None
     };
@@ -453,7 +457,7 @@ fn render_panel(
             buffer,
             Rect::new(area.x, area.y + 1, area.width.saturating_sub(1), 1),
             area.y + 1,
-            state,
+            &state,
             Style::default().fg(palette.overlay0),
         );
     }
@@ -464,7 +468,6 @@ fn render_panel(
         area.height.saturating_sub(3),
     );
     hits.agent_body = body;
-    let now = inbox::now_millis();
     let lines = inbox::inbox_lines(&view.rows, now, &view.shelves, shown);
     if body.is_empty() || lines.is_empty() {
         *scroll = 0;
