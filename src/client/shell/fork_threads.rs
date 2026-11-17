@@ -24,23 +24,36 @@ pub(crate) struct ClientThreads {
     pub(super) url: String,
     pub(super) machine: String,
     pub(super) template: CommandTemplate,
+    /// Ticket picker key (`new_key`); `None` leaves the picker off.
+    pub(super) new_key: Option<crate::config::ActionKeybinds>,
+    /// `new_command`, with `{ticket}` still in it.
+    pub(super) new_command: String,
 }
 
 impl ClientThreads {
     /// Builds the client view of `[ui.threads]` and (re)starts or stops the
     /// reader to match. Returns a diagnostic when the config cannot work.
     pub(super) fn from_config(config: &crate::config::ThreadsConfig) -> (Self, Option<String>) {
-        let diagnostic = config.diagnostic();
+        let mut diagnostic = config.diagnostic();
         let threads = if config.enabled() && diagnostic.is_none() {
+            let new_key = config.new_keybinds().unwrap_or_else(|error| {
+                diagnostic = Some(error);
+                None
+            });
             Self {
                 url: config.url.trim().trim_end_matches('/').to_owned(),
                 machine: config.machine.trim().to_owned(),
                 template: CommandTemplate::parse(&config.command).unwrap_or_default(),
+                new_command: config.new_command.trim().to_owned(),
+                new_key,
             }
         } else {
             Self::default()
         };
-        super::fork_threads_feed::ensure_reader(&threads.url);
+        super::fork_threads_feed::ensure_reader(&threads.url, threads.new_key.is_some());
+        if threads.new_key.is_none() {
+            super::fork_tickets::close_picker();
+        }
         if let Ok(mut view) = VIEW.write() {
             view.enabled = threads.enabled();
             if !view.enabled {
@@ -100,6 +113,7 @@ fn listed_ids(rows: &[ThreadRow]) -> std::collections::HashSet<String> {
 /// Test seam: what the reader would have delivered.
 #[cfg(test)]
 pub(super) fn set_view_for_test(rows: Vec<ThreadRow>, stale: bool) {
+    TEST_VIEW_SET.store(true, std::sync::atomic::Ordering::Release);
     if let Ok(mut view) = VIEW.write() {
         view.listed = listed_ids(&rows);
         view.rows = Arc::new(rows);
@@ -118,8 +132,17 @@ pub(super) fn update_view(change: impl FnOnce(&mut ThreadsView)) {
     }
 }
 
+/// Set once a test supplied the rows; the reader then no longer replaces
+/// them.
+#[cfg(test)]
+static TEST_VIEW_SET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Pulls the reader's latest state into the view. True when it changed.
 pub(super) fn refresh_view() -> bool {
+    #[cfg(test)]
+    if TEST_VIEW_SET.load(std::sync::atomic::Ordering::Acquire) {
+        return false;
+    }
     let Some(feed) = super::fork_threads_feed::feed_state() else {
         return false;
     };
@@ -1031,42 +1054,69 @@ pub(super) fn plan_open(
                 .unwrap_or_else(|| row.display_title().to_owned()),
         });
     };
-    let agents = snapshot
+    if let Some(agent) = snapshot.agents.iter().find(|agent| {
+        agent.workspace_id == workspace_id
+            && agent_resume(agent)
+                .and_then(|line| template.thread_in(line))
+                .as_deref()
+                == Some(thread_id)
+    }) {
+        return Some(OpenPlan::FocusPane(agent.pane_id.clone()));
+    }
+    Some(replace_or_add(snapshot, template, workspace_id))
+}
+
+/// Restart the workspace's thread pane (the focused one first) in place, or
+/// add one when it has none. A thread pane is one whose reported resume
+/// command runs `command`'s program.
+pub(super) fn replace_or_add(
+    snapshot: &ClientShellSnapshot,
+    template: &CommandTemplate,
+    workspace_id: String,
+) -> OpenPlan {
+    let mut thread_panes = snapshot
         .agents
         .iter()
         .filter(|agent| agent.workspace_id == workspace_id)
-        .filter_map(|agent| Some((agent, agent_resume(agent)?)))
-        .collect::<Vec<_>>();
-    if let Some((agent, _)) = agents
-        .iter()
-        .find(|(_, line)| template.thread_in(line).as_deref() == Some(thread_id))
-    {
-        return Some(OpenPlan::FocusPane(agent.pane_id.clone()));
-    }
-    let mut thread_panes = agents
-        .iter()
-        .filter(|(_, line)| template.runs_program(line))
-        .map(|(agent, _)| *agent)
+        .filter(|agent| agent_resume(agent).is_some_and(|line| template.runs_program(line)))
         .collect::<Vec<_>>();
     thread_panes.sort_by_key(|agent| !agent.focused);
-    Some(match thread_panes.first() {
+    match thread_panes.first() {
         Some(agent) => OpenPlan::Replace(agent.pane_id.clone()),
         None => OpenPlan::AddTo(workspace_id),
-    })
+    }
+}
+
+/// What an open opens: a listed thread, or a new thread for a ticket
+/// (the ticket picker).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum OpenTarget {
+    Thread(String),
+    NewForTicket(String),
 }
 
 /// An open waiting for its machine to become the shown one.
 struct PendingOpen {
     endpoint_id: ClientEndpointId,
-    thread_id: String,
+    target: OpenTarget,
     deadline: std::time::Instant,
+}
+
+/// Test seam: the open waiting for its machine, if any.
+#[cfg(test)]
+pub(super) fn pending_open_for_test() -> Option<(ClientEndpointId, OpenTarget)> {
+    PENDING
+        .lock()
+        .ok()?
+        .as_ref()
+        .map(|open| (open.endpoint_id.clone(), open.target.clone()))
 }
 
 static PENDING: std::sync::Mutex<Option<PendingOpen>> = std::sync::Mutex::new(None);
 const PENDING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 impl ClientShellState {
-    fn fork_threads_snapshot(
+    pub(super) fn fork_threads_snapshot(
         &self,
         endpoint_id: &ClientEndpointId,
     ) -> Option<&ClientShellSnapshot> {
@@ -1090,22 +1140,56 @@ impl ClientShellState {
     /// pane that shows it, restarts the workspace's thread pane on it, or adds
     /// one; a thread without a workspace gets one first.
     pub(super) fn fork_threads_open(&mut self, thread_id: &str, outcome: &mut ClientShellInput) {
-        let threads = &self.config.threads;
-        let Some(endpoint_id) = machine_endpoint_id(&threads.machine, &self.endpoints) else {
+        let Some(endpoint_id) = self.fork_threads_machine(outcome) else {
+            return;
+        };
+        let view = view();
+        let template = self.config.threads.template.clone();
+        let plan = self
+            .fork_threads_snapshot(&endpoint_id)
+            .and_then(|snapshot| plan_open(snapshot, &template, &view.rows, thread_id));
+        let command = template.command_for(thread_id);
+        self.fork_threads_run(
+            endpoint_id,
+            plan,
+            command,
+            OpenTarget::Thread(thread_id.to_owned()),
+            outcome,
+        );
+    }
+
+    /// The thread machine's endpoint; a notice when no such machine exists.
+    pub(super) fn fork_threads_machine(
+        &mut self,
+        outcome: &mut ClientShellInput,
+    ) -> Option<ClientEndpointId> {
+        let machine = &self.config.threads.machine;
+        let endpoint_id = machine_endpoint_id(machine, &self.endpoints);
+        if endpoint_id.is_none() {
+            let message = format!("No saved machine labelled \"{machine}\"");
             self.push_endpoint_notice(
                 ClientEndpointNoticeKind::Unavailable,
                 "threads_machine_missing",
                 "Thread machine unknown",
-                format!("No saved machine labelled \"{}\"", threads.machine),
+                message,
             );
             outcome.repaint = true;
-            return;
-        };
-        let view = view();
-        let template = threads.template.clone();
-        let plan = self
-            .fork_threads_snapshot(&endpoint_id)
-            .and_then(|snapshot| plan_open(snapshot, &template, &view.rows, thread_id));
+        }
+        endpoint_id
+    }
+
+    /// Carries out an open plan on the thread machine: focus a pane, or
+    /// `pane.run_command` with `command`. When the machine is not the shown
+    /// one, shows it first and leaves `target` pending for the client timer,
+    /// which plans again once the machine's surface is up.
+    pub(super) fn fork_threads_run(
+        &mut self,
+        endpoint_id: ClientEndpointId,
+        plan: Option<OpenPlan>,
+        command: Option<String>,
+        target: OpenTarget,
+        outcome: &mut ClientShellInput,
+    ) {
         outcome.repaint = true;
         if let Some(OpenPlan::FocusPane(pane_id)) = &plan {
             self.focus_or_activate(
@@ -1118,7 +1202,7 @@ impl ClientShellState {
         if !self.fork_threads_ready(&endpoint_id) {
             // pane.run_command goes to the shown machine; show it first and
             // finish on the client timer once its surface is up.
-            let target = match &plan {
+            let focus = match &plan {
                 Some(OpenPlan::Replace(pane_id)) => {
                     Some(ClientEndpointFocusTarget::Pane(pane_id.clone()))
                 }
@@ -1127,25 +1211,22 @@ impl ClientShellState {
                 }
                 _ => None,
             };
-            let shown = match target {
-                Some(target) => self.focus_or_activate(endpoint_id.clone(), target, outcome),
+            let shown = match focus {
+                Some(focus) => self.focus_or_activate(endpoint_id.clone(), focus, outcome),
                 None => self.activate_endpoint(endpoint_id.clone(), outcome),
             };
             if shown {
                 if let Ok(mut pending) = PENDING.lock() {
                     *pending = Some(PendingOpen {
                         endpoint_id,
-                        thread_id: thread_id.to_owned(),
+                        target,
                         deadline: std::time::Instant::now() + PENDING_TIMEOUT,
                     });
                 }
             }
             return;
         }
-        let Some(plan) = plan else {
-            return;
-        };
-        let Some(command) = template.command_for(thread_id) else {
+        let (Some(plan), Some(command)) = (plan, command) else {
             return;
         };
         let mut params = crate::api::schema::PaneRunCommandParams {
@@ -1191,8 +1272,10 @@ impl ClientShellState {
                 _ => None,
             }
         };
-        if let Some(open) = ready {
-            self.fork_threads_open(&open.thread_id, outcome);
+        match ready.map(|open| open.target) {
+            Some(OpenTarget::Thread(thread_id)) => self.fork_threads_open(&thread_id, outcome),
+            Some(OpenTarget::NewForTicket(label)) => self.fork_tickets_open(&label, outcome),
+            None => {}
         }
     }
 

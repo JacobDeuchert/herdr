@@ -701,6 +701,8 @@ impl ClientShellState {
             };
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
+        // fork: FORK.md 0005
+        self.fork_tickets_compose(&mut frame, &mut occlusion);
         if let Some(ClientShellOverlay::Help(help)) = self.overlay.as_mut() {
             help.scroll = help.scroll.min(self.hits.help_max_scroll);
         }

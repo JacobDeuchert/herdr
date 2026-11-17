@@ -451,6 +451,10 @@ impl ClientShellState {
     }
 
     pub(super) fn insert_overlay_text(&mut self, text: &str) -> bool {
+        // fork: FORK.md 0005
+        if super::fork_tickets::insert_picker_text(text) {
+            return true;
+        }
         if self.insert_worktree_overlay_text(text) {
             return true;
         }

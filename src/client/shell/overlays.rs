@@ -2,6 +2,9 @@ use super::*;
 
 mod settings_overlay;
 mod worktree_overlays;
+// fork: FORK.md 0005
+mod fork_tickets_overlay;
+pub(in crate::client::shell) use fork_tickets_overlay::fork_render_ticket_picker;
 
 #[derive(Default)]
 pub(crate) struct OverlayRender {

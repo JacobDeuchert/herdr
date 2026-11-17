@@ -397,6 +397,7 @@ local files (new, fork-only):
 - `src/client/shell/fork_threads_feed.rs` — HTTP/SSE reader, parsing of the session list and its `inbox` object, fallback, timestamps, sanitizing (+ stub service in its tests)
 - `src/client/shell/fork_threads_inbox.rs` — t3code inbox rules: sections, sort, shelves/caps, row labels, recede, next clock change (pure)
 - `src/client/shell/fork_threads.rs` — panel rendering (expanded and collapsed), command template, mapping, hiding, open plan, click, agent key bindings, navigate cursor, timer
+- the ticket picker files, see the addendum below
 - `src/client/shell/tests/fork_threads.rs`
 - `src/app/fork_threads.rs` — resume history token, `fork.resume` projection helper, `pane.run_command`
 - `src/api/schema/fork_threads.rs` — `PaneRunCommandParams`
@@ -640,6 +641,126 @@ opened the third row in a workspace labelled by its ticket; click on a row
 opens; wheel scrolls; `flat` data → one active list by `updated_at` with
 `Working 1` and `Settled 0`; stub down → `offline`, rows kept; stub up →
 recovered. Not verified: a real remote machine, the real tkd.
+
+### 0005 addendum: ticket picker (`[ui.threads] new_key`)
+
+Part of 0005; reapply it after the main entry. Added 2026-11-17 (decided by
+Jacob the same day).
+
+local files (new, fork-only):
+
+- `src/client/shell/fork_tickets.rs` — ticket parsing, filter, order and
+  groups, open plan, picker state and keys, composition hook
+- `src/client/shell/fork_tickets_overlay.rs` — the overlay (child of
+  `overlays.rs`, so it reuses `panel`, `popup`, `contrast`)
+- `src/client/shell/tests/fork_tickets.rs`
+
+touched files (each hook is marked `// fork: FORK.md 0005`):
+
+| file | anchor | hook |
+| --- | --- | --- |
+| `src/client/shell.rs` | `mod` list | `mod fork_tickets;` |
+| `src/client/shell/overlays.rs` | `mod worktree_overlays;` | `mod fork_tickets_overlay;` + re-export `fork_render_ticket_picker` |
+| `src/client/shell/render.rs` | `pub(super) use overlays::{…}` | re-export `fork_render_ticket_picker` |
+| `src/client/shell/input.rs` | top of `route_key_press`; Terminal and Prefix arms, after the 0004 hooks | `fork_tickets_picker_key`; `fork_tickets_key` (Direct / Prefix) |
+| `src/client/shell/overlay_input.rs` | top of `insert_overlay_text` | `fork_tickets::insert_picker_text` |
+| `src/client/shell/mouse.rs` | top of `handle_mouse` | `fork_tickets_mouse` |
+| `src/client/shell/composition.rs` | after the `if let Some(overlay) = self.overlay` block of `compose` | `self.fork_tickets_compose(&mut frame, &mut occlusion)` |
+| `src/client/shell/tests/mod.rs` | test `mod` list | `mod fork_tickets;` |
+
+plus, inside the 0005 files: `ThreadsConfig::{new_key, new_command,
+new_keybinds}` and `TICKET_PLACEHOLDER` (exported from `src/config.rs`);
+`ClientThreads::{new_key, new_command}`; the reader fetches tickets
+(`ensure_reader(url, tickets)`, `FeedState::tickets*`); `fork_threads_open`
+split into `fork_threads_machine` + `fork_threads_run` (shared with the
+picker); `replace_or_add` split out of `plan_open`; the pending open holds an
+`OpenTarget` (`Thread(id)` | `NewForTicket(label)`).
+
+behaviour:
+
+```toml
+[ui.threads]
+new_key = "prefix+t"                                  # empty (default): picker off
+new_command = 'd="$(tk dir {ticket})" && cd "$d" && exec t3t'   # default; {ticket} = ticket label
+```
+
+- Data: with `new_key` set, the reader also fetches `GET <url>/api/tickets`
+  on every new stamp (after `/api/sessions`). A failing ticket fetch (an
+  older tkd) only marks the picker offline. Done and dropped tickets are
+  dropped; so are items whose `label` is not `t<digits>` (it ends up in a
+  shell command line). Title, status and `extRef` are sanitized like thread
+  titles; `dir` is kept only when absolute and free of control characters.
+- Order: started tickets (in-progress / in-review, then any other
+  non-parked status), then a dim, unselectable `parked` header and the
+  parked ones (todo, then draft); label number descending inside each. The
+  header is left out when its group is empty after filtering.
+- Picker: `new_key` in Terminal or Prefix mode (checked before the regular
+  bindings, like 0004's key, so it wins over `[keys]` and over a shown
+  machine's `[[keys.command]]`) opens a modal centred over the current view,
+  styled like the worktree picker: filter line, rows `label status title …
+  extRef`, the selected ticket's action (`new workspace t13`, `new thread
+  in place of the thread pane in X`, `new thread pane in X`), key hints.
+  Typing filters (every word must be a substring of label, title or ref,
+  case-insensitive); up/down and ctrl+n/ctrl+p move (the cursor never lands
+  on the header); Enter starts the thread; Esc or ctrl+c closes. It takes
+  every key, committed text and paste while open; a mouse press closes it.
+  Loading and offline (with the error when there is no list yet) show in
+  the picker.
+- Enter: plan on the thread machine's snapshot. The ticket's workspace is
+  the one whose history names a thread whose row has that `ticket.label`,
+  else one labelled with the ticket (a workspace the picker created before
+  its t3t reported a thread). It has a thread pane → restart it in place
+  (focused one first, `OpenPlan::Replace`), else add one (`AddTo`); no
+  workspace → new workspace labelled with the ticket, `cwd` = the ticket's
+  `dir` when set. Command: `new_command` with `{ticket}` replaced after the
+  label passed `^t[0-9]+$`. Same `fork_threads_run` path as a thread row,
+  including showing the machine first and finishing on the client timer.
+- `pane.run_command` types the command + CR into the new pane's
+  interactive shell (`pane.send_text`), so `new_command` is shell syntax
+  and needs no `sh -c`. A fresh `t3t` is a draft and reports its thread
+  only after the first prompt; until then its pane is not a thread pane.
+
+design notes: the picker is not a `ClientShellOverlay` variant (that enum is
+matched all over upstream input, mouse and render code); it is a
+process-wide cell like the thread view, drawn by one composition hook after
+upstream's overlays, and its input is taken first in `route_key_press`.
+Repeats of a key the picker consumed are reprocessed by upstream's input
+leases through the same path. Key precedence: the client-side key is
+matched before `resolve_prefix_binding`, which also holds the shown
+endpoint's `[[keys.command]]` bindings (merged into the client keymap for
+the `Local` keybinding source), so `prefix+t` opens the picker even while
+the VM's own `prefix+t` (`local.tk-board.open`) is bound there. It is not
+part of `[keys]`: no collision diagnostic, not in help or settings. A
+`new_key = "prefix+shift+t"` would silently shadow upstream's default
+`rename_tab`.
+
+known gaps: clicks do not select rows (a press only closes). No scrollbar,
+no page up/down. No new thread when the ticket list is empty or offline
+with nothing cached. A pane whose draft t3t has not reported a thread is not
+replaced; Enter adds a second pane next to it.
+
+remove when: with 0005.
+
+verification:
+
+```sh
+cargo nextest run --locked tickets threads
+```
+
+Manual (2026-11-17, debug build, isolated XDG dirs, `HERDR_SOCKET_PATH` in
+`/tmp` (the scratchpad path was too long for a unix socket; debug builds
+read `herdr-dev/config.toml`), client in a private tmux server, `machine =
+""`, a Python stub of tkd (`/api/events`, `/api/sessions`, `/api/tickets`)
+and stand-ins for `t3t` (reports `t3t -r <id>` when resumed, else prints
+"draft") and `tk dir` (mkdir + print)): picker with the stub down shows
+`offline` and the connection error; after starting the stub it filled in on
+its own with t11/t6, `parked`, t13/t14, closed t2 absent, bidi stripped;
+Enter on t6, whose thread runs in a workspace labelled `six`, replaced that
+pane in place (old pane closed, new draft t3t in `tk dir t6`); `conf` →
+only t13 under `parked`, Enter created workspace `t13` with the draft t3t in
+its new dir; picker on t13 again offers `new thread pane in t13` (label
+fallback); stub down → `offline`, rows kept. Not verified: a remote thread
+machine (covered by a unit test only), the real tkd and t3t.
 
 ---
 

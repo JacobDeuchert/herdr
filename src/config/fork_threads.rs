@@ -4,13 +4,23 @@
 //! draws one sidebar row per thread. Each row opens the thread in a workspace
 //! on the server named by `machine`, running `command` there. Empty `url`
 //! (the default) disables everything.
+//!
+//! `new_key` opens a ticket picker; picking a ticket starts a new thread for
+//! it with `new_command`. Empty `new_key` (the default) leaves it off.
 
 use serde::{Deserialize, Serialize};
 
 /// Placeholder in `command` that is replaced by the thread id.
 pub const THREAD_PLACEHOLDER: &str = "{thread}";
 
+/// Placeholder in `new_command` that is replaced by the ticket label
+/// (`t<digits>`, validated before substitution).
+pub const TICKET_PLACEHOLDER: &str = "{ticket}";
+
 const DEFAULT_COMMAND: &str = "t3t -r {thread}";
+/// Typed into the new pane's shell (`pane.run_command`), so shell syntax
+/// works. `tk dir` prints the ticket dir and creates it when missing.
+const DEFAULT_NEW_COMMAND: &str = r#"d="$(tk dir {ticket})" && cd "$d" && exec t3t"#;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
@@ -26,6 +36,12 @@ pub struct ThreadsConfig {
     /// The same pattern recognises which thread an existing pane shows, from
     /// the resume command the pane reported.
     pub command: String,
+    /// Binding that opens the ticket picker, e.g. "prefix+t". Empty (default)
+    /// leaves the picker off.
+    pub new_key: String,
+    /// Command a new thread for a picked ticket runs; `{ticket}` is replaced
+    /// by the ticket label. Typed into the pane's shell.
+    pub new_command: String,
 }
 
 impl Default for ThreadsConfig {
@@ -34,6 +50,8 @@ impl Default for ThreadsConfig {
             url: String::new(),
             machine: String::new(),
             command: DEFAULT_COMMAND.into(),
+            new_key: String::new(),
+            new_command: DEFAULT_NEW_COMMAND.into(),
         }
     }
 }
@@ -67,6 +85,24 @@ impl ThreadsConfig {
         }
         None
     }
+
+    /// Parsed `new_key`, or a diagnostic when the picker cannot work. `None`
+    /// when the key is unset or the thread list is off.
+    pub fn new_keybinds(&self) -> Result<Option<super::ActionKeybinds>, String> {
+        let key = self.new_key.trim();
+        if key.is_empty() || !self.enabled() {
+            return Ok(None);
+        }
+        let command = self.new_command.trim();
+        if command.is_empty() || command.chars().any(char::is_control) {
+            return Err(
+                "ui.threads.new_command must be one non-empty line; ticket picker disabled".into(),
+            );
+        }
+        super::ActionKeybinds::from_labels(&[key.to_string()])
+            .map(Some)
+            .map_err(|_| format!("invalid ui.threads.new_key: {key}; ticket picker disabled"))
+    }
 }
 
 #[cfg(test)]
@@ -79,6 +115,34 @@ mod tests {
         assert!(!config.enabled());
         assert!(config.diagnostic().is_none());
         assert_eq!(config.command, "t3t -r {thread}");
+        assert!(config.new_key.is_empty());
+        assert_eq!(config.new_command, r#"d="$(tk dir {ticket})" && cd "$d" && exec t3t"#);
+        assert!(config.new_keybinds().unwrap().is_none());
+    }
+
+    #[test]
+    fn threads_config_parses_the_ticket_picker_key() {
+        let config: crate::config::Config =
+            toml::from_str("[ui.threads]\nurl = \"http://h:1\"\nnew_key = \"prefix+t\"\n").unwrap();
+        assert!(config.ui.threads.new_keybinds().unwrap().is_some());
+        let bad_key = ThreadsConfig {
+            url: "http://h:1".into(),
+            new_key: "prefix+".into(),
+            ..ThreadsConfig::default()
+        };
+        assert!(bad_key.new_keybinds().is_err());
+        let no_command = ThreadsConfig {
+            url: "http://h:1".into(),
+            new_key: "prefix+t".into(),
+            new_command: " ".into(),
+            ..ThreadsConfig::default()
+        };
+        assert!(no_command.new_keybinds().is_err());
+        let threads_off = ThreadsConfig {
+            new_key: "prefix+t".into(),
+            ..ThreadsConfig::default()
+        };
+        assert!(threads_off.new_keybinds().unwrap().is_none());
     }
 
     #[test]
