@@ -11,6 +11,9 @@
 use super::fork_threads_feed::{RowStatus, ThreadRow};
 use std::cmp::Ordering;
 
+/// Pinned + active rows shown before "Show N more" (fork layout, D41
+/// amendment 2026-11-17; t3code has no cap).
+pub(crate) const INBOX_LIMIT: usize = 8;
 /// Settled rows shown when the shelf opens.
 pub(crate) const SETTLED_INITIAL: usize = 10;
 /// Settled rows each "Show N more" adds.
@@ -54,10 +57,12 @@ impl Section {
     }
 }
 
-/// Client-local shelf state; not persisted.
+/// Client-local shelf state; not persisted. Working is not a shelf here:
+/// it is its own section below the inbox, always open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Shelves {
-    pub(crate) working_open: bool,
+    /// The inbox shows all pinned + active rows, not the first `INBOX_LIMIT`.
+    pub(crate) inbox_open: bool,
     pub(crate) snoozed_open: bool,
     pub(crate) settled_open: bool,
     pub(crate) settled_limit: usize,
@@ -66,7 +71,7 @@ pub(crate) struct Shelves {
 impl Default for Shelves {
     fn default() -> Self {
         Self {
-            working_open: false,
+            inbox_open: false,
             snoozed_open: false,
             settled_open: false,
             settled_limit: SETTLED_INITIAL,
@@ -77,20 +82,22 @@ impl Default for Shelves {
 impl Shelves {
     pub(crate) fn is_open(&self, section: Section) -> bool {
         match section {
-            Section::Working => self.working_open,
             Section::Snoozed => self.snoozed_open,
             Section::Settled => self.settled_open,
-            Section::Pinned | Section::Active => true,
+            Section::Pinned | Section::Active | Section::Working => true,
         }
     }
 
     pub(crate) fn toggle(&mut self, section: Section) {
         match section {
-            Section::Working => self.working_open = !self.working_open,
             Section::Snoozed => self.snoozed_open = !self.snoozed_open,
             Section::Settled => self.settled_open = !self.settled_open,
-            Section::Pinned | Section::Active => {}
+            Section::Pinned | Section::Active | Section::Working => {}
         }
+    }
+
+    pub(crate) fn toggle_inbox(&mut self) {
+        self.inbox_open = !self.inbox_open;
     }
 
     pub(crate) fn show_more(&mut self) {
@@ -188,12 +195,27 @@ pub(crate) enum InboxLine {
     },
     /// "Show N more" under the Settled rows.
     ShowMore(usize),
+    /// Under the capped inbox rows: "Show N more" (closed, `hidden` rows
+    /// left out) or "Show less" (open).
+    Expand { hidden: usize, open: bool },
 }
 
-/// Lines top to bottom: pinned rows, active rows, then the Working and
-/// Snoozed shelves (only when non-empty) and the Settled shelf (always,
-/// unless the list is empty). A closed shelf still shows `shown`, the thread
-/// on screen; the open Settled shelf is capped at `settled_limit`.
+/// Rows that stay visible past the inbox cap: they need Jacob (D4).
+fn needs_attention(row: &ThreadRow) -> bool {
+    row.inbox.raised_hand
+        || matches!(
+            row.inbox.status,
+            RowStatus::Approval | RowStatus::Input | RowStatus::Request
+        )
+}
+
+/// Lines top to bottom: the inbox (pinned rows, active rows, together capped
+/// at `INBOX_LIMIT` unless `inbox_open`, then the Snoozed shelf when
+/// non-empty and the Settled shelf always, unless the list is empty), then
+/// the Working rows, a section of their own that `working_start` finds. A
+/// closed shelf or the capped inbox still shows `shown`, the thread on
+/// screen; the capped inbox also keeps rows that need attention; the open
+/// Settled shelf is capped at `settled_limit`.
 pub(crate) fn inbox_lines(
     rows: &[ThreadRow],
     now: i64,
@@ -216,9 +238,9 @@ pub(crate) fn inbox_lines(
     let order = [
         Section::Pinned,
         Section::Active,
-        Section::Working,
         Section::Snoozed,
         Section::Settled,
+        Section::Working,
     ];
     for section in order {
         sort_section(section, &mut sections[slot(section)], rows);
@@ -227,14 +249,43 @@ pub(crate) fn inbox_lines(
         return Vec::new();
     }
     let mut lines = Vec::new();
+    let is_shown = |index: usize| shown == Some(rows[index].id.as_str());
+    let inbox = sections[slot(Section::Pinned)]
+        .iter()
+        .map(|index| (*index, Section::Pinned))
+        .chain(
+            sections[slot(Section::Active)]
+                .iter()
+                .map(|index| (*index, Section::Active)),
+        )
+        .collect::<Vec<_>>();
+    let mut hidden = 0;
+    for (position, (index, section)) in inbox.iter().copied().enumerate() {
+        if shelves.inbox_open
+            || position < INBOX_LIMIT
+            || is_shown(index)
+            || needs_attention(&rows[index])
+        {
+            lines.push(InboxLine::Row { index, section });
+        } else {
+            hidden += 1;
+        }
+    }
+    if inbox.len() > INBOX_LIMIT {
+        lines.push(InboxLine::Expand {
+            hidden,
+            open: shelves.inbox_open,
+        });
+    }
     for section in order {
         let members = &sections[slot(section)];
         let row = |index: usize| InboxLine::Row { index, section };
-        let is_shown = |index: &&usize| shown == Some(rows[**index].id.as_str());
+        let is_shown = |index: &&usize| is_shown(**index);
         match section {
-            Section::Pinned | Section::Active => lines.extend(members.iter().map(|i| row(*i))),
-            Section::Working | Section::Snoozed if members.is_empty() => {}
-            Section::Working | Section::Snoozed | Section::Settled => {
+            Section::Pinned | Section::Active => {}
+            Section::Working => lines.extend(members.iter().map(|i| row(*i))),
+            Section::Snoozed if members.is_empty() => {}
+            Section::Snoozed | Section::Settled => {
                 let open = shelves.is_open(section);
                 lines.push(InboxLine::Shelf {
                     section,
@@ -260,6 +311,23 @@ pub(crate) fn inbox_lines(
         }
     }
     lines
+}
+
+/// Where the Working section starts in `lines` (`lines.len()` when it is
+/// empty): the lines before it are the inbox, drawn in the scrolling area.
+pub(crate) fn working_start(lines: &[InboxLine]) -> usize {
+    lines
+        .iter()
+        .position(|line| {
+            matches!(
+                line,
+                InboxLine::Row {
+                    section: Section::Working,
+                    ..
+                }
+            )
+        })
+        .unwrap_or(lines.len())
 }
 
 /// Row indices in display order; next/previous and focus N walk this.

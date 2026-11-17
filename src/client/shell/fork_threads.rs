@@ -106,6 +106,9 @@ pub(super) fn set_view_for_test(rows: Vec<ThreadRow>, stale: bool) {
         view.loaded = true;
         view.stale = stale;
         view.error = stale.then(|| "down".into());
+        view.shelves = Default::default();
+        view.cursor = None;
+        view.reveal = None;
     }
 }
 
@@ -157,6 +160,8 @@ pub(super) enum ThreadHitTarget {
     Thread(String),
     Shelf(Section),
     ShowMore,
+    /// "Show N more" / "Show less" under the capped inbox.
+    ExpandInbox,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -477,12 +482,49 @@ fn render_panel(
         }
         return;
     }
-    let heights = lines
+    let all_heights = lines
         .iter()
         .map(|line| line_height(line, &view.rows))
         .collect::<Vec<_>>();
-    let gaps = vec![0; lines.len()];
     let cursor = view.cursor.filter(|cursor| *cursor < lines.len());
+    // The Working section: its own block at the bottom of the panel, up to
+    // half of it, not scrolled with the inbox above (D41 amendment
+    // 2026-11-17).
+    let split = inbox::working_start(&lines);
+    let working_height = if split < lines.len() {
+        let wanted = 2 + all_heights[split..].iter().sum::<u16>();
+        wanted.min((body.height / 2).max(3)).min(body.height)
+    } else {
+        0
+    };
+    let working_area = Rect::new(
+        body.x,
+        body.bottom().saturating_sub(working_height),
+        body.width,
+        working_height,
+    );
+    let body = Rect::new(
+        body.x,
+        body.y,
+        body.width,
+        body.height.saturating_sub(working_height),
+    );
+    hits.agent_body = body;
+    render_working(
+        buffer,
+        working_area,
+        &lines,
+        &all_heights,
+        split,
+        &view,
+        shown,
+        cursor,
+        now,
+        config,
+        hits,
+    );
+    let heights = &all_heights[..split];
+    let gaps = vec![0; split];
     let reveal_line = match view.reveal.take() {
         Some(Reveal::Cursor) => cursor,
         Some(Reveal::Thread(id)) => lines.iter().position(
@@ -493,16 +535,20 @@ fn render_panel(
     if reveal_line.is_some() {
         update_view(|view| view.reveal = None);
     }
-    if let Some(target) = reveal_line {
+    if split == 0 || body.is_empty() {
+        *scroll = 0;
+        return;
+    }
+    if let Some(target) = reveal_line.filter(|line| *line < split) {
         *scroll = super::scroll::list_scroll_start_to_reveal(
-            &heights,
+            heights,
             &gaps,
             body.height,
             *scroll,
             target,
         );
     }
-    let metrics = super::scroll::list_scroll_metrics(&heights, &gaps, body.height, *scroll);
+    let metrics = super::scroll::list_scroll_metrics(heights, &gaps, body.height, *scroll);
     hits.agent_max_scroll = metrics.max_offset_from_bottom;
     hits.agent_scroll_metrics = Some(metrics);
     *scroll = metrics
@@ -512,7 +558,7 @@ fn render_panel(
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
     // Like t3code, the shelves sit at the bottom when everything fits.
     let total: u16 = heights.iter().sum();
-    let first_shelf = lines
+    let first_shelf = lines[..split]
         .iter()
         .position(|line| matches!(line, InboxLine::Shelf { .. }));
     let shelf_offset = match first_shelf {
@@ -522,7 +568,7 @@ fn render_panel(
         _ => 0,
     };
     let mut y = body.y;
-    for (position, line) in lines.iter().enumerate().skip(*scroll) {
+    for (position, line) in lines[..split].iter().enumerate().skip(*scroll) {
         if Some(position) == first_shelf {
             y = y.saturating_add(shelf_offset);
         }
@@ -545,7 +591,72 @@ fn render_panel(
     }
 }
 
+/// The Working section: a rule, " working N", then its rows (never
+/// scrolled; rows that do not fit are cut off).
 #[allow(clippy::too_many_arguments)] // one call site; the arguments are the render inputs
+fn render_working(
+    buffer: &mut Buffer,
+    area: Rect,
+    lines: &[InboxLine],
+    heights: &[u16],
+    split: usize,
+    view: &ThreadsView,
+    shown: Option<&str>,
+    cursor: Option<usize>,
+    now: i64,
+    config: &ClientShellConfig,
+    hits: &mut ShellHitMap,
+) {
+    let palette = &config.palette;
+    if area.height == 0 {
+        return;
+    }
+    super::render::put_text(
+        buffer,
+        area.x,
+        area.y,
+        area.width,
+        &"─".repeat(area.width as usize),
+        Style::default().fg(palette.surface_dim),
+    );
+    if area.height < 2 {
+        return;
+    }
+    super::render::put_text(
+        buffer,
+        area.x,
+        area.y + 1,
+        area.width,
+        &format!(" working {}", lines.len() - split),
+        Style::default()
+            .fg(palette.overlay0)
+            .add_modifier(Modifier::BOLD),
+    );
+    let mut y = area.y + 2;
+    for (position, line) in lines.iter().enumerate().skip(split) {
+        let height = heights[position];
+        if y.saturating_add(height) > area.bottom() {
+            break;
+        }
+        let rect = Rect::new(area.x, y, area.width, height);
+        let target = render_line(
+            buffer,
+            rect,
+            line,
+            view,
+            shown,
+            cursor == Some(position),
+            now,
+            config,
+        );
+        if config.mouse_capture {
+            hits.fork_threads.push(ThreadHit { rect, target });
+        }
+        y = y.saturating_add(height);
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // the arguments are the render inputs
 fn render_line(
     buffer: &mut Buffer,
     rect: Rect,
@@ -590,6 +701,22 @@ fn render_line(
                 Style::default().fg(palette.overlay1),
             );
             ThreadHitTarget::ShowMore
+        }
+        InboxLine::Expand { hidden, open } => {
+            let text = if *open {
+                "   Show less".to_owned()
+            } else {
+                format!("   Show {hidden} more")
+            };
+            super::render::put_text(
+                buffer,
+                rect.x,
+                rect.y,
+                rect.width,
+                &text,
+                Style::default().fg(palette.overlay1),
+            );
+            ThreadHitTarget::ExpandInbox
         }
         InboxLine::Row { index, section } => {
             let row = &view.rows[*index];
@@ -1099,6 +1226,10 @@ impl ClientShellState {
                 update_view(|view| view.shelves.show_more());
                 outcome.repaint = true;
             }
+            ThreadHitTarget::ExpandInbox => {
+                update_view(|view| view.shelves.toggle_inbox());
+                outcome.repaint = true;
+            }
         }
     }
 
@@ -1267,6 +1398,7 @@ impl ClientShellState {
                     }
                     InboxLine::Shelf { section, .. } => ThreadHitTarget::Shelf(section),
                     InboxLine::ShowMore(_) => ThreadHitTarget::ShowMore,
+                    InboxLine::Expand { .. } => ThreadHitTarget::ExpandInbox,
                 };
                 if matches!(target, ThreadHitTarget::Thread(_)) {
                     clear();

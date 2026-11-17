@@ -195,7 +195,6 @@ fn threads_inbox_sorts_each_section() {
         }),
     ];
     let shelves = Shelves {
-        working_open: true,
         snoozed_open: true,
         settled_open: true,
         ..Shelves::default()
@@ -212,6 +211,7 @@ fn threads_inbox_sorts_each_section() {
                 format!("[{} {count} {open}]", section.shelf_label())
             }
             InboxLine::ShowMore(count) => format!("[more {count}]"),
+            InboxLine::Expand { hidden, open } => format!("[expand {hidden} {open}]"),
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -224,9 +224,6 @@ fn threads_inbox_sorts_each_section() {
             "a-new-y",
             "a-new-z",
             "a-old", // active: newest, id tie-break
-            "[Working 2 true]",
-            "w-new",
-            "w-old",
             "[Snoozed 2 true]",
             "s-soon",
             "s-late", // soonest wake first
@@ -234,7 +231,75 @@ fn threads_inbox_sorts_each_section() {
             "x-a",
             "x-b",
             "x-none",
+            "w-new", // Working: its own section after the inbox, no shelf
+            "w-old",
         ]
+    );
+}
+
+fn inbox_names(rows: &[ThreadRow], shelves: &Shelves, shown: Option<&str>) -> Vec<String> {
+    inbox::inbox_lines(rows, 1_000 * DAY, shelves, shown)
+        .into_iter()
+        .map(|line| match line {
+            InboxLine::Row { index, .. } => rows[index].id.clone(),
+            InboxLine::Shelf { section, count, .. } => {
+                format!("[{} {count}]", section.shelf_label())
+            }
+            InboxLine::ShowMore(count) => format!("[more {count}]"),
+            InboxLine::Expand { hidden, open } => format!("[expand {hidden} {open}]"),
+        })
+        .collect()
+}
+
+#[test]
+fn threads_inbox_caps_pinned_and_active_rows() {
+    let mut rows = vec![with(thread("pin", None, RowStatus::Ready), |inbox| {
+        inbox.pinned = true
+    })];
+    rows.extend((0..11).map(|index| {
+        with(
+            thread(&format!("a{index:02}"), None, RowStatus::Ready),
+            |inbox| inbox.inbox_sort_at = Some(100 - index),
+        )
+    }));
+    // Past the cap but needing Jacob: stays visible.
+    rows[11].inbox.status = RowStatus::Approval;
+    let names = inbox_names(&rows, &Shelves::default(), Some("a09"));
+    assert_eq!(
+        names,
+        [
+            "pin",
+            "a00",
+            "a01",
+            "a02",
+            "a03",
+            "a04",
+            "a05",
+            "a06", // 8 with the pinned row
+            "a09", // on screen
+            "a10", // approval
+            "[expand 2 false]",
+            "[Settled 0]",
+        ]
+    );
+    let open = Shelves {
+        inbox_open: true,
+        ..Shelves::default()
+    };
+    let names = inbox_names(&rows, &open, None);
+    assert_eq!(names.len(), 12 + 2, "{names:?}");
+    assert_eq!(names[12], "[expand 0 true]");
+}
+
+#[test]
+fn threads_inbox_has_no_expand_line_within_the_cap() {
+    let rows = (0..8)
+        .map(|index| thread(&format!("a{index}"), None, RowStatus::Ready))
+        .collect::<Vec<_>>();
+    let names = inbox_names(&rows, &Shelves::default(), None);
+    assert!(
+        !names.iter().any(|name| name.starts_with("[expand")),
+        "{names:?}"
     );
 }
 
@@ -262,18 +327,19 @@ fn threads_inbox_shelves_collapse_cap_and_keep_the_shown_thread() {
         lines[1..],
         [
             InboxLine::Shelf {
-                section: Section::Working,
-                count: 1,
-                open: false
-            },
-            InboxLine::Shelf {
                 section: Section::Settled,
                 count: 40,
                 open: false
             },
+            InboxLine::Row {
+                index: 1,
+                section: Section::Working
+            },
         ],
-        "no Snoozed shelf without snoozed threads"
+        "no Snoozed shelf without snoozed threads; Working after the inbox"
     );
+    // The rest is about the Settled shelf, which then ends the list.
+    rows.remove(1);
     // The thread on screen stays visible in its closed shelf.
     let lines = inbox::inbox_lines(&rows, now, &closed, Some("x30"));
     assert!(
@@ -479,8 +545,8 @@ fn threads_fallback_rows_form_one_active_list_by_update_time() {
         .into_iter()
         .map(|index| rows[index].id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(order, ["new", "old"]);
-    assert!(lines.contains(&InboxLine::Shelf {
+    assert_eq!(order, ["new", "old", "run"]);
+    assert!(!lines.contains(&InboxLine::Shelf {
         section: Section::Working,
         count: 1,
         open: false
@@ -511,7 +577,7 @@ fn threads_panel_replaces_the_agents_section_below_the_spaces() {
 }
 
 #[test]
-fn threads_panel_draws_shelves_and_toggles_them_by_click() {
+fn threads_panel_draws_working_section_below_the_inbox() {
     let mut rows = sample_threads();
     rows.push(with(thread("w1", None, RowStatus::Working), |inbox| {
         inbox.working = true
@@ -521,19 +587,28 @@ fn threads_panel_draws_shelves_and_toggles_them_by_click() {
     }));
     fork_threads::set_view_for_test(rows, false);
     let (mut state, frame) = render(threads_config(""));
-    let working = line_of(&frame, "Working 1");
     let settled = line_of(&frame, "Settled 1");
-    assert!(settled > working);
+    let working = line_of(&frame, " working 1");
+    let w1 = line_of(&frame, "thread w1");
+    assert!(working > settled && w1 > working, "{frame:#?}");
     assert!(
-        !frame.iter().any(|row| row.contains("thread w1")),
+        !frame.iter().any(|row| row.contains("Working 1")),
+        "no shelf"
+    );
+    assert!(
+        !frame.iter().any(|row| row.contains("thread x1")),
         "closed shelf"
     );
     assert!(!frame.iter().any(|row| row.contains("Snoozed")));
+    assert!(
+        state.hits.agent_body.bottom() < working as u16,
+        "the inbox scrolls above the working section"
+    );
     let shelf = state
         .hits
         .fork_threads
         .iter()
-        .find(|hit| hit.target == fork_threads::ThreadHitTarget::Shelf(Section::Working))
+        .find(|hit| hit.target == fork_threads::ThreadHitTarget::Shelf(Section::Settled))
         .unwrap()
         .rect;
     state.handle_raw_events(vec![crate::raw_input::RawInputEvent::Mouse(MouseEvent {
@@ -544,10 +619,40 @@ fn threads_panel_draws_shelves_and_toggles_them_by_click() {
     })]);
     let frame = frame_rows(&state.compose(100, 30).unwrap());
     assert!(
-        frame.iter().any(|row| row.contains("thread w1")),
+        frame.iter().any(|row| row.contains("thread x1")),
         "{frame:#?}"
     );
-    assert!(fork_threads::view().shelves.working_open);
+    assert!(fork_threads::view().shelves.settled_open);
+}
+
+#[test]
+fn threads_panel_expands_the_inbox_by_click() {
+    let rows = (0..10)
+        .map(|index| {
+            with(
+                thread(&format!("t{index:02}"), None, RowStatus::Ready),
+                |inbox| inbox.inbox_sort_at = Some(100 - index),
+            )
+        })
+        .collect();
+    fork_threads::set_view_for_test(rows, false);
+    let (mut state, frame) = render(threads_config(""));
+    line_of(&frame, "Show 2 more");
+    assert!(!frame.iter().any(|row| row.contains("thread t09")));
+    let expand = state
+        .hits
+        .fork_threads
+        .iter()
+        .find(|hit| hit.target == fork_threads::ThreadHitTarget::ExpandInbox)
+        .unwrap()
+        .rect;
+    state.handle_raw_events(vec![crate::raw_input::RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: expand.x + 4,
+        row: expand.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(fork_threads::view().shelves.inbox_open);
 }
 
 #[test]
@@ -569,6 +674,7 @@ fn threads_panel_scrolls_with_the_wheel_like_the_agents_section() {
         })
         .collect();
     fork_threads::set_view_for_test(rows, false);
+    fork_threads::update_view(|view| view.shelves.inbox_open = true);
     let (mut state, rows) = render(threads_config(""));
     assert!(rows.iter().any(|row| row.contains("thread t00")));
     assert!(state.hits.agent_max_scroll > 0);

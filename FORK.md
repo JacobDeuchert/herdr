@@ -483,17 +483,23 @@ command = "t3t -r {thread}"      # pane command; {thread} = thread id
   (below the machines/spaces list, same rule + ` threads` header, same
   share of the sidebar and section divider). Rows with `listed` false are
   dropped. Section = snoozed (`snoozed_until > now && !raised_hand`) →
-  settled → pinned → working → active. Top to bottom: pinned rows, active
-  rows (no headers), then `Working N` and `Snoozed N` (only when
-  non-empty) and `Settled N` (always, unless the list is empty); shelves
-  start closed, sit at the bottom of the panel when everything fits, and
-  toggle by click or Enter in navigate mode. A closed shelf still shows the
-  thread on screen. Open Settled shows 10 rows (plus the one on screen) and
-  `Show N more` (+25). Sort: pinned by `pin_order_key` ascending, keyless
+  settled → pinned → working → active. Top to bottom: the inbox, then
+  the Working section. The inbox is pinned rows and active rows (no
+  headers), capped together at 8 with `Show N more` / `Show less` (fork
+  rule, not t3code's; rows past the cap stay when they are on screen or
+  need attention: raised hand, Approval, Input, Request), then `Snoozed N`
+  (only when non-empty) and `Settled N` (always, unless the list is
+  empty); shelves start closed, sit at the bottom of the inbox area when
+  everything fits, and toggle by click or Enter in navigate mode. A closed
+  shelf still shows the thread on screen. Open Settled shows 10 rows (plus
+  the one on screen) and `Show N more` (+25). Working is not a shelf
+  (fork rule, workflow-hub D41 amendment 2026-11-17): its own block at the
+  bottom of the panel, a rule and ` working N`, always open, up to half
+  the panel, not scrolled with the inbox; drawn only when non-empty. Sort: pinned by `pin_order_key` ascending, keyless
   by `created_at` desc; active by `inbox_sort_at`, working by
   `working_sort_at`, settled by `settled_sort_at`, all desc; snoozed by
-  `snoozed_until` asc (stable); ties by id. Shelf state and page size live
-  in the client process only.
+  `snoozed_until` asc (stable); ties by id. Shelf state, the inbox
+  expansion and page size live in the client process only.
 - Rows: pinned/active/working are cards: icon, title, right-aligned label,
   and a dim second line (ticket label · project · branch · `#N state`) when
   there is one. Label: Approval / Input / Request / Waiting + duration /
