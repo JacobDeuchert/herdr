@@ -612,6 +612,10 @@ impl ClientShellState {
         key: &crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) -> Option<ClientInputTarget> {
+        // fork: FORK.md 0005
+        if self.fork_tickets_picker_key(key, outcome) {
+            return None;
+        }
         if self.handle_modal_paste_shortcut_with(key, outcome, crate::platform::read_clipboard_text)
         {
             return None;
@@ -674,6 +678,10 @@ impl ClientShellState {
                 if self.fork_main_agent_key(key, crate::input::KeybindDispatch::Direct, outcome) {
                     return None;
                 }
+                // fork: FORK.md 0005
+                if self.fork_tickets_key(key, crate::input::KeybindDispatch::Direct, outcome) {
+                    return None;
+                }
                 if let Some(binding) =
                     crate::input::resolve_direct_binding(&self.config.keybinds.keybinds, key)
                 {
@@ -707,6 +715,12 @@ impl ClientShellState {
                 }
                 // fork: FORK.md 0004
                 if self.fork_main_agent_key(key, crate::input::KeybindDispatch::Prefix, outcome) {
+                    self.mode = return_mode;
+                    outcome.repaint = true;
+                    return None;
+                }
+                // fork: FORK.md 0005
+                if self.fork_tickets_key(key, crate::input::KeybindDispatch::Prefix, outcome) {
                     self.mode = return_mode;
                     outcome.repaint = true;
                     return None;

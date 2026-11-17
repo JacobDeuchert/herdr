@@ -1,8 +1,9 @@
 //! fork: thread service reader for the sidebar thread list (FORK.md 0005).
 //!
 //! One background thread per client process follows `GET <url>/api/events`
-//! (server-sent events) and refetches `GET <url>/api/sessions` whenever the
-//! `stamp` event's data changes. Nothing polls: a refetch happens on connect
+//! (server-sent events) and refetches `GET <url>/api/sessions` (and, with the
+//! ticket picker on, `GET <url>/api/tickets`) whenever the `stamp` event's
+//! data changes. Nothing polls: a refetch happens on connect
 //! and on each new stamp. When the service drops or fails, the last rows stay
 //! and are marked stale until a reconnect (with backoff) succeeds.
 //!
@@ -673,24 +674,33 @@ fn body_reader(stream: TcpStream) -> io::Result<Box<dyn BufRead + Send>> {
     })
 }
 
-pub(crate) fn fetch_sessions(url: &HttpUrl) -> Result<Vec<ThreadRow>, String> {
+fn fetch_body(url: &HttpUrl, path: &str) -> Result<Vec<u8>, String> {
     let mut stream = url.connect().map_err(|error| error.to_string())?;
     stream
         .set_read_timeout(Some(REQUEST_TIMEOUT))
         .map_err(|error| error.to_string())?;
     stream
-        .write_all(url.request("/api/sessions", "application/json").as_bytes())
+        .write_all(url.request(path, "application/json").as_bytes())
         .map_err(|error| error.to_string())?;
     let mut body = Vec::new();
     body_reader(stream)
-        .map_err(|error| format!("/api/sessions: {error}"))?
+        .map_err(|error| format!("{path}: {error}"))?
         .take(MAX_BODY_BYTES as u64 + 1)
         .read_to_end(&mut body)
         .map_err(|error| error.to_string())?;
     if body.len() > MAX_BODY_BYTES {
-        return Err("thread list is too large".into());
+        return Err(format!("{path}: response is too large"));
     }
-    parse_sessions(&body)
+    Ok(body)
+}
+
+pub(crate) fn fetch_sessions(url: &HttpUrl) -> Result<Vec<ThreadRow>, String> {
+    parse_sessions(&fetch_body(url, "/api/sessions")?)
+}
+
+/// fork: ticket picker (FORK.md 0005).
+pub(crate) fn fetch_tickets(url: &HttpUrl) -> Result<Vec<super::fork_tickets::TicketRow>, String> {
+    super::fork_tickets::parse_tickets(&fetch_body(url, "/api/tickets")?)
 }
 
 /// Incremental server-sent-events parser. Yields `(event, data)` per
@@ -745,23 +755,33 @@ pub(crate) struct FeedState {
     /// The service is unreachable or failing; `rows` are the last known ones.
     pub(crate) stale: bool,
     pub(crate) error: Option<String>,
+    /// Open tickets for the picker, when the reader fetches them.
+    pub(crate) tickets: Arc<Vec<super::fork_tickets::TicketRow>>,
+    /// At least one ticket fetch succeeded.
+    pub(crate) tickets_loaded: bool,
+    /// The last ticket fetch failed; `tickets` are the last known ones.
+    pub(crate) tickets_error: Option<String>,
 }
 
 struct Reader {
     url: String,
+    tickets: bool,
     stop: Arc<AtomicBool>,
     state: Arc<Mutex<FeedState>>,
 }
 
 static READER: Mutex<Option<Reader>> = Mutex::new(None);
 
-/// Starts, restarts, or stops the process-wide reader so it follows `url`.
-/// Empty `url` stops it.
-pub(crate) fn ensure_reader(url: &str) {
+/// Starts, restarts, or stops the process-wide reader so it follows `url`,
+/// fetching tickets too when `tickets`. Empty `url` stops it.
+pub(crate) fn ensure_reader(url: &str, tickets: bool) {
     let Ok(mut reader) = READER.lock() else {
         return;
     };
-    if reader.as_ref().is_some_and(|reader| reader.url == url) {
+    if reader
+        .as_ref()
+        .is_some_and(|reader| reader.url == url && reader.tickets == tickets)
+    {
         return;
     }
     if let Some(previous) = reader.take() {
@@ -779,7 +799,7 @@ pub(crate) fn ensure_reader(url: &str) {
     let thread_state = Arc::clone(&state);
     let thread_stop = Arc::clone(&stop);
     let spawned = crate::thread_spawn::spawn_named("herdr-threads", move || match parsed {
-        Ok(url) => run_reader(&url, &thread_stop, &thread_state),
+        Ok(url) => run_reader(&url, tickets, &thread_stop, &thread_state),
         Err(error) => update(&thread_state, |state| state.error = Some(error)),
     });
     if let Err(error) = spawned {
@@ -789,6 +809,7 @@ pub(crate) fn ensure_reader(url: &str) {
     }
     *reader = Some(Reader {
         url: url.to_owned(),
+        tickets,
         stop,
         state,
     });
@@ -831,10 +852,10 @@ fn sleep_unless_stopped(duration: Duration, stop: &AtomicBool) {
     }
 }
 
-fn run_reader(url: &HttpUrl, stop: &AtomicBool, state: &Mutex<FeedState>) {
+fn run_reader(url: &HttpUrl, tickets: bool, stop: &AtomicBool, state: &Mutex<FeedState>) {
     let mut backoff = BACKOFF_START;
     while !stop.load(Ordering::Acquire) {
-        match follow_events(url, stop, state, &mut backoff) {
+        match follow_events(url, tickets, stop, state, &mut backoff) {
             Ok(()) => return,
             Err(error) => {
                 if stop.load(Ordering::Acquire) {
@@ -852,6 +873,7 @@ fn run_reader(url: &HttpUrl, stop: &AtomicBool, state: &Mutex<FeedState>) {
 /// Holds one event stream until it fails. `Ok` only when stopped.
 fn follow_events(
     url: &HttpUrl,
+    tickets: bool,
     stop: &AtomicBool,
     state: &Mutex<FeedState>,
     backoff: &mut Duration,
@@ -921,6 +943,18 @@ fn follow_events(
             }
             // Keep the stream: the next stamp retries the fetch.
             Err(error) => mark_stale(state, error),
+        }
+        if tickets {
+            // An older service without /api/tickets only fails the picker.
+            let result = fetch_tickets(url);
+            update(state, |state| match result {
+                Ok(tickets) => {
+                    state.tickets = Arc::new(tickets);
+                    state.tickets_loaded = true;
+                    state.tickets_error = None;
+                }
+                Err(error) => state.tickets_error = Some(error),
+            });
         }
     }
 }
@@ -1146,6 +1180,7 @@ mod tests {
     pub(crate) struct StubService {
         pub(crate) url: String,
         pub(crate) body: Arc<Mutex<String>>,
+        pub(crate) tickets: Arc<Mutex<String>>,
         stamp: Arc<Mutex<u64>>,
         streams: Arc<Mutex<Vec<TcpStream>>>,
         pub(crate) listener_alive: Arc<AtomicBool>,
@@ -1156,9 +1191,11 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let body = Arc::new(Mutex::new(body));
+            let tickets = Arc::new(Mutex::new(String::from("[]")));
             let stamp = Arc::new(Mutex::new(1));
             let streams = Arc::new(Mutex::new(Vec::new()));
             let listener_alive = Arc::new(AtomicBool::new(true));
+            let thread_tickets = Arc::clone(&tickets);
             let (thread_body, thread_stamp, thread_streams, alive) = (
                 Arc::clone(&body),
                 Arc::clone(&stamp),
@@ -1186,6 +1223,12 @@ mod tests {
                             stream,
                             "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{body}"
                         );
+                    } else if first.starts_with("GET /api/tickets ") {
+                        let body = thread_tickets.lock().unwrap().clone();
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{body}"
+                        );
                     } else if first.starts_with("GET /api/events") {
                         let stamp = *thread_stamp.lock().unwrap();
                         let _ = write!(
@@ -1201,6 +1244,7 @@ mod tests {
             Self {
                 url,
                 body,
+                tickets,
                 stamp,
                 streams,
                 listener_alive,
@@ -1250,10 +1294,14 @@ mod tests {
     #[test]
     fn threads_reader_follows_stamps_and_keeps_rows_while_down() {
         let service = StubService::start(format!("[{}]", session_json("t1", None, "idle")));
-        ensure_reader(&service.url);
-        let state = wait_for(|state| state.loaded);
+        ensure_reader(&service.url, true);
+        let state = wait_for(|state| state.loaded && state.tickets_loaded);
         assert!(!state.stale);
         assert_eq!(state.rows.len(), 1);
+        assert!(state.tickets.is_empty());
+
+        *service.tickets.lock().unwrap() =
+            r#"[{"label":"t3","id":3,"title":"T","status":"todo"}]"#.into();
 
         *service.body.lock().unwrap() = format!(
             "[{},{}]",
@@ -1264,7 +1312,8 @@ mod tests {
             session_json("t1", None, "idle")
         );
         service.bump();
-        let state = wait_for(|state| state.rows.len() == 2);
+        let state = wait_for(|state| state.rows.len() == 2 && state.tickets.len() == 1);
+        assert_eq!(state.tickets[0].label, "t3");
         assert_eq!(state.rows[0].id, "t2");
         assert!(state.rows[0].inbox.from_service && state.rows[0].inbox.settled);
         assert_eq!(state.rows[0].inbox.status, RowStatus::Input);
@@ -1278,7 +1327,7 @@ mod tests {
         let state = wait_for(|state| !state.stale);
         assert_eq!(state.rows.len(), 2);
 
-        ensure_reader("");
+        ensure_reader("", false);
         assert!(feed_state().is_none());
     }
 
@@ -1287,7 +1336,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         drop(listener);
-        ensure_reader(&url);
+        ensure_reader(&url, false);
         let state = wait_for(|state| state.error.is_some());
         assert!(state.stale);
         assert!(!state.loaded);
