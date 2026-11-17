@@ -20,7 +20,7 @@ pub const TICKET_PLACEHOLDER: &str = "{ticket}";
 const DEFAULT_COMMAND: &str = "t3t -r {thread}";
 /// Typed into the new pane's shell (`pane.run_command`), so shell syntax
 /// works. `tk dir` prints the ticket dir and creates it when missing.
-const DEFAULT_NEW_COMMAND: &str = r#"cd "$(tk dir {ticket})" && exec t3t"#;
+const DEFAULT_NEW_COMMAND: &str = r#"d="$(tk dir {ticket})" && cd "$d" && exec t3t"#;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
@@ -116,7 +116,7 @@ mod tests {
         assert!(config.diagnostic().is_none());
         assert_eq!(config.command, "t3t -r {thread}");
         assert!(config.new_key.is_empty());
-        assert_eq!(config.new_command, r#"cd "$(tk dir {ticket})" && exec t3t"#);
+        assert_eq!(config.new_command, r#"d="$(tk dir {ticket})" && cd "$d" && exec t3t"#);
         assert!(config.new_keybinds().unwrap().is_none());
     }
 

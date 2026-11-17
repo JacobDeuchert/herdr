@@ -10,7 +10,7 @@ use crate::client::shell::fork_tickets::{
 };
 use std::sync::Arc;
 
-const NEW_COMMAND: &str = r#"cd "$(tk dir {ticket})" && exec t3t"#;
+const NEW_COMMAND: &str = r#"d="$(tk dir {ticket})" && cd "$d" && exec t3t"#;
 
 /// The live shape of tkd's `/api/tickets` (trimmed), plus closed and
 /// malformed items.
@@ -267,7 +267,7 @@ fn tickets_labels_are_validated_before_substitution() {
     }
     assert_eq!(
         ticket_command(NEW_COMMAND, "t13").as_deref(),
-        Some(r#"cd "$(tk dir t13)" && exec t3t"#)
+        Some(r#"d="$(tk dir t13)" && cd "$d" && exec t3t"#)
     );
     assert_eq!(ticket_command(NEW_COMMAND, "t13;reboot"), None);
     assert_eq!(ticket_command("", "t13"), None);
@@ -336,7 +336,7 @@ fn tickets_picker_filters_and_enter_runs_the_new_command() {
     let outcome = press(&mut state, KeyCode::Enter, KeyModifiers::NONE);
     assert!(!fork_tickets::picker_open());
     let params = run_command(&outcome);
-    assert_eq!(params.command, r#"cd "$(tk dir t6)" && exec t3t"#);
+    assert_eq!(params.command, r#"d="$(tk dir t6)" && cd "$d" && exec t3t"#);
     assert_eq!(params.replace_pane_id.as_deref(), Some("pane_b"));
 
     // ctrl+n moves, Enter on a parked ticket creates its workspace.
@@ -348,7 +348,7 @@ fn tickets_picker_filters_and_enter_runs_the_new_command() {
     press(&mut state, KeyCode::Char('p'), KeyModifiers::CONTROL);
     press(&mut state, KeyCode::Down, KeyModifiers::NONE);
     let params = run_command(&press(&mut state, KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(params.command, r#"cd "$(tk dir t13)" && exec t3t"#);
+    assert_eq!(params.command, r#"d="$(tk dir t13)" && cd "$d" && exec t3t"#);
     assert_eq!(params.label.as_deref(), Some("t13"));
     assert_eq!(params.cwd, None);
 
@@ -452,7 +452,7 @@ fn tickets_open_on_another_machine_waits_for_it() {
     let mut outcome = ClientShellInput::default();
     state.fork_threads_tick(&mut outcome);
     let params = run_command(&outcome);
-    assert_eq!(params.command, r#"cd "$(tk dir t6)" && exec t3t"#);
+    assert_eq!(params.command, r#"d="$(tk dir t6)" && cd "$d" && exec t3t"#);
     assert_eq!(params.replace_pane_id.as_deref(), Some("pane_b"));
     assert_eq!(fork_threads::pending_open_for_test(), None);
 }

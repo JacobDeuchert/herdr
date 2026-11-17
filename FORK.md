@@ -681,7 +681,7 @@ behaviour:
 ```toml
 [ui.threads]
 new_key = "prefix+t"                                  # empty (default): picker off
-new_command = 'cd "$(tk dir {ticket})" && exec t3t'   # default; {ticket} = ticket label
+new_command = 'd="$(tk dir {ticket})" && cd "$d" && exec t3t'   # default; {ticket} = ticket label
 ```
 
 - Data: with `new_key` set, the reader also fetches `GET <url>/api/tickets`
