@@ -5,8 +5,9 @@ use crate::client::endpoint::{ClientEndpointStatus, ProfileId, SavedSshEndpoint}
 use crate::client::shell::fork_threads::{self, OpenPlan, OpenTarget};
 use crate::client::shell::fork_threads_feed::RowStatus;
 use crate::client::shell::fork_tickets::{
-    self, filter_tickets, parse_tickets, picker_lines, plan_ticket_open, ticket_command,
-    valid_ticket_label, PickerLine, TicketList, TicketRow,
+    self, filter_projects, filter_tickets, parse_projects, parse_tickets, picker_items,
+    picker_lines, plan_ticket_open, project_command, ticket_command, valid_ticket_label,
+    PickerItem, PickerLine, ProjectRow, TicketList, TicketRow,
 };
 use std::sync::Arc;
 
@@ -32,6 +33,21 @@ const TICKETS_JSON: &str = r#"[
   42
 ]"#;
 
+/// tkd's `/api/projects` shape plus unsafe and malformed items.
+const PROJECTS_JSON: &str = r#"[
+  {"id":"p-nixos","title":"nixos-work","root":"/home/dev/src/github/nixos-work","activity_at":"2026-11-17T10:00:00.000Z"},
+  {"id":"p-nvim","title":"","root":"/home/dev/src/github/nvim/","activity_at":null},
+  {"id":"p-quote","title":"Evil","root":"/tmp/it's"},
+  {"id":"p-rel","title":"Relative","root":"src/x"},
+  {"id":"p-nixos","title":"Duplicate","root":"/x"},
+  {"title":"No id","root":"/y"},
+  7
+]"#;
+
+fn projects() -> Vec<ProjectRow> {
+    parse_projects(PROJECTS_JSON.as_bytes()).unwrap()
+}
+
 fn tickets() -> Vec<TicketRow> {
     parse_tickets(TICKETS_JSON.as_bytes()).unwrap()
 }
@@ -43,11 +59,16 @@ fn labels(tickets: &[TicketRow], indices: &[usize]) -> Vec<String> {
         .collect()
 }
 
-fn set_tickets() {
-    fork_tickets::set_tickets_for_test(TicketList {
+fn list() -> TicketList {
+    TicketList {
         tickets: Arc::new(tickets()),
+        projects: Arc::new(projects()),
         ..TicketList::default()
-    });
+    }
+}
+
+fn set_tickets() {
+    fork_tickets::set_tickets_for_test(list());
 }
 
 fn picker_config(machine: &str) -> ClientShellConfig {
@@ -206,27 +227,39 @@ fn tickets_filter_on_label_title_and_ref() {
 }
 
 #[test]
-fn tickets_group_parked_ones_below_a_header() {
-    let tickets = tickets();
-    let all = filter_tickets(&tickets, "");
+fn tickets_group_parked_ones_and_projects_below_headers() {
+    let list = list();
+    let all = picker_items(&list, "");
     assert_eq!(
-        picker_lines(&tickets, &all),
+        picker_lines(&list, &all),
         [
-            PickerLine::Ticket(0),
-            PickerLine::Ticket(1),
-            PickerLine::Ticket(2),
+            PickerLine::Item(0),
+            PickerLine::Item(1),
+            PickerLine::Item(2),
             PickerLine::ParkedHeader,
-            PickerLine::Ticket(3),
-            PickerLine::Ticket(4),
+            PickerLine::Item(3),
+            PickerLine::Item(4),
+            PickerLine::ProjectsHeader,
+            PickerLine::Item(5),
+            PickerLine::Item(6),
         ]
     );
+    assert_eq!(all[5], PickerItem::Project(0));
     // No parked match: no header. Only parked matches: header first.
-    let started = filter_tickets(&tickets, "redmine");
-    assert!(!picker_lines(&tickets, &started).contains(&PickerLine::ParkedHeader));
-    let parked = filter_tickets(&tickets, "draft");
+    let started = picker_items(&list, "redmine");
+    let lines = picker_lines(&list, &started);
+    assert!(!lines.contains(&PickerLine::ParkedHeader));
+    assert!(!lines.contains(&PickerLine::ProjectsHeader));
+    let parked = picker_items(&list, "draft");
     assert_eq!(
-        picker_lines(&tickets, &parked),
-        [PickerLine::ParkedHeader, PickerLine::Ticket(0)]
+        picker_lines(&list, &parked),
+        [PickerLine::ParkedHeader, PickerLine::Item(0)]
+    );
+    let nvim = picker_items(&list, "nvim");
+    assert_eq!(nvim, [PickerItem::Project(1)]);
+    assert_eq!(
+        picker_lines(&list, &nvim),
+        [PickerLine::ProjectsHeader, PickerLine::Item(0)]
     );
 
     // In the overlay the cursor starts on the first started ticket and
@@ -246,7 +279,62 @@ fn tickets_group_parked_ones_below_a_header() {
         press(&mut state, KeyCode::Down, KeyModifiers::NONE);
     }
     let view = state.fork_tickets_view().unwrap();
-    assert_eq!(view.list.tickets[view.filtered[view.selected]].label, "t13");
+    assert_eq!(view.items[view.selected], PickerItem::Ticket(3));
+    assert_eq!(view.list.tickets[3].label, "t13");
+    // The group header, not the count on the filter line.
+    let projects = rows
+        .iter()
+        .position(|row| row.contains(" projects") && !row.contains("tickets"))
+        .expect("projects header");
+    assert!(line("t14") < projects);
+    assert!(projects < line("nixos-work"));
+}
+
+#[test]
+fn projects_decode_filter_and_quote_the_root() {
+    let projects = projects();
+    let ids = projects.iter().map(|p| p.id.as_str()).collect::<Vec<_>>();
+    // Service order kept; unsafe roots, missing ids, repeats dropped.
+    assert_eq!(ids, ["p-nixos", "p-nvim"]);
+    assert_eq!(
+        projects[1].title, "nvim",
+        "empty title: last path component"
+    );
+    assert!(parse_projects(b"{}").is_err());
+    assert_eq!(filter_projects(&projects, "github"), [0, 1]);
+    assert_eq!(filter_projects(&projects, "NIXOS"), [0]);
+    assert!(filter_projects(&projects, "t6").is_empty());
+    assert_eq!(
+        project_command("cd {dir} && exec t3t", "/home/dev/src/github/nvim").as_deref(),
+        Some("cd '/home/dev/src/github/nvim' && exec t3t")
+    );
+    assert_eq!(project_command("cd {dir} && exec t3t", "/tmp/it's"), None);
+    assert_eq!(project_command("cd {dir} && exec t3t", "rel"), None);
+    assert_eq!(project_command("", "/x"), None);
+}
+
+#[test]
+fn projects_enter_creates_a_workspace_in_the_root() {
+    let mut state = local_state();
+    open_picker(&mut state);
+    type_text(&mut state, "nixos");
+    let rows = frame_rows(&state.compose(100, 30).unwrap());
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("new workspace nixos-work in /home/dev/src/github/nixos-work")),
+        "{rows:#?}"
+    );
+    let params = run_command(&press(&mut state, KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        params.command,
+        "cd '/home/dev/src/github/nixos-work' && exec t3t"
+    );
+    assert_eq!(params.label.as_deref(), Some("nixos-work"));
+    assert_eq!(
+        params.cwd.as_deref(),
+        Some("/home/dev/src/github/nixos-work")
+    );
+    assert_eq!((params.replace_pane_id, params.workspace_id), (None, None));
 }
 
 #[test]
@@ -322,7 +410,10 @@ fn tickets_picker_filters_and_enter_runs_the_new_command() {
     let mut state = local_state();
     open_picker(&mut state);
     let rows = frame_rows(&state.compose(100, 30).unwrap());
-    assert!(rows.iter().any(|row| row.contains("new thread for ticket")));
+    assert!(rows.iter().any(|row| row.contains("new thread")));
+    assert!(rows
+        .iter()
+        .any(|row| row.contains("5 tickets · 2 projects")));
     assert!(rows.iter().any(|row| row.contains("redmine:3745")));
     // The selected ticket (t11) has a workspace without a t3t pane.
     assert!(
@@ -332,7 +423,7 @@ fn tickets_picker_filters_and_enter_runs_the_new_command() {
     );
     type_text(&mut state, "iana");
     let view = state.fork_tickets_view().unwrap();
-    assert_eq!(view.filtered.len(), 1);
+    assert_eq!(view.items.len(), 1);
     let outcome = press(&mut state, KeyCode::Enter, KeyModifiers::NONE);
     assert!(!fork_tickets::picker_open());
     let params = run_command(&outcome);
@@ -348,7 +439,10 @@ fn tickets_picker_filters_and_enter_runs_the_new_command() {
     press(&mut state, KeyCode::Char('p'), KeyModifiers::CONTROL);
     press(&mut state, KeyCode::Down, KeyModifiers::NONE);
     let params = run_command(&press(&mut state, KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(params.command, r#"d="$(tk dir t13)" && cd "$d" && exec t3t"#);
+    assert_eq!(
+        params.command,
+        r#"d="$(tk dir t13)" && cd "$d" && exec t3t"#
+    );
     assert_eq!(params.label.as_deref(), Some("t13"));
     assert_eq!(params.cwd, None);
 

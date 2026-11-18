@@ -28,6 +28,8 @@ pub(crate) struct ClientThreads {
     pub(super) new_key: Option<crate::config::ActionKeybinds>,
     /// `new_command`, with `{ticket}` still in it.
     pub(super) new_command: String,
+    /// `project_command`, with `{dir}` still in it.
+    pub(super) project_command: String,
 }
 
 impl ClientThreads {
@@ -45,6 +47,7 @@ impl ClientThreads {
                 machine: config.machine.trim().to_owned(),
                 template: CommandTemplate::parse(&config.command).unwrap_or_default(),
                 new_command: config.new_command.trim().to_owned(),
+                project_command: config.project_command.trim().to_owned(),
                 new_key,
             }
         } else {
@@ -89,6 +92,9 @@ pub(super) struct ThreadsView {
     pub(super) reveal: Option<Reveal>,
     /// When a clock-driven label or section changes next (Unix ms).
     pub(super) clock_due: Option<i64>,
+    /// Draft rows of the current render (filled by `render_panel` on its
+    /// copy of the view, never stored).
+    pub(super) drafts: Vec<Draft>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +191,8 @@ pub(super) enum ThreadHitTarget {
     ShowMore,
     /// "Show N more" / "Show less" under the capped inbox.
     ExpandInbox,
+    /// A draft row: its workspace on the thread machine.
+    Draft(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,6 +220,33 @@ fn shown_for_render(
     shown_thread(active_snapshot?, &config.threads.template)
 }
 
+/// The thread machine's draft workspaces, as `drafts` reads them from its
+/// snapshot; `focused` only when the thread machine is the shown one.
+fn machine_drafts(
+    active_snapshot: Option<&ClientShellSnapshot>,
+    config: &ClientShellConfig,
+    endpoints: &[ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+) -> Vec<Draft> {
+    let Some(endpoint_id) = machine_endpoint_id(&config.threads.machine, endpoints) else {
+        return Vec::new();
+    };
+    let shown = endpoint_id == *active_endpoint_id;
+    let snapshot = if shown {
+        active_snapshot
+    } else {
+        endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == endpoint_id)
+            .and_then(|endpoint| endpoint.snapshot.as_deref())
+    };
+    let mut drafts = snapshot.map(drafts).unwrap_or_default();
+    for draft in &mut drafts {
+        draft.focused &= shown;
+    }
+    drafts
+}
+
 /// Sidebar hook, expanded sidebars: draws the thread panel in the agents
 /// section's area. Returns what is left for the agents section: nothing
 /// when the panel was drawn, all of `area` when the feature is off.
@@ -232,11 +267,18 @@ pub(super) fn render_thread_panel(
         state.endpoints,
         state.active_endpoint_id,
     );
+    let drafts = machine_drafts(
+        active_snapshot,
+        config,
+        state.endpoints,
+        state.active_endpoint_id,
+    );
     render_panel(
         buffer,
         area,
         config,
         shown.as_deref(),
+        &drafts,
         state.agent_scroll,
         hits,
     );
@@ -434,6 +476,7 @@ fn render_panel(
     area: Rect,
     config: &ClientShellConfig,
     shown: Option<&str>,
+    drafts: &[Draft],
     scroll: &mut usize,
     hits: &mut ShellHitMap,
 ) {
@@ -454,6 +497,7 @@ fn render_panel(
         return;
     }
     let mut view = view();
+    view.drafts = drafts.to_vec();
     super::render::put_text(
         buffer,
         area.x,
@@ -491,7 +535,7 @@ fn render_panel(
         area.height.saturating_sub(3),
     );
     hits.agent_body = body;
-    let lines = inbox::inbox_lines(&view.rows, now, &view.shelves, shown);
+    let lines = panel_lines(&view.rows, now, &view.shelves, shown, drafts);
     if body.is_empty() || lines.is_empty() {
         *scroll = 0;
         if view.loaded && !body.is_empty() {
@@ -752,6 +796,68 @@ fn render_line(
             );
             ThreadHitTarget::Thread(row.id.clone())
         }
+        InboxLine::Draft(index) => {
+            let draft = &view.drafts[*index];
+            render_draft(buffer, rect, draft, selected, config);
+            ThreadHitTarget::Draft(draft.workspace_id.clone())
+        }
+    }
+}
+
+/// A draft row: one line, a hollow icon, the workspace label and `draft`.
+fn render_draft(
+    buffer: &mut Buffer,
+    rect: Rect,
+    draft: &Draft,
+    selected: bool,
+    config: &ClientShellConfig,
+) {
+    let palette = &config.palette;
+    if draft.focused && !selected {
+        buffer.set_style(
+            rect,
+            Style::default().bg(super::sidebar::workspace_active_background(palette, false)),
+        );
+    }
+    super::render::put_text(
+        buffer,
+        rect.x + 1,
+        rect.y,
+        2,
+        "◌",
+        Style::default().fg(palette.overlay1),
+    );
+    let title_style = if draft.focused || selected {
+        Style::default()
+            .fg(palette.text)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(palette.subtext0)
+    };
+    let title_x = rect.x + 3;
+    let available = rect.right().saturating_sub(title_x);
+    let label = "draft";
+    let label_width = if available > 12 {
+        super::render::display_width(label)
+    } else {
+        0
+    };
+    super::render::put_text(
+        buffer,
+        title_x,
+        rect.y,
+        available.saturating_sub(if label_width > 0 { label_width + 2 } else { 1 }),
+        &draft.label,
+        title_style,
+    );
+    if label_width > 0 {
+        super::render::put_right_text(
+            buffer,
+            Rect::new(rect.x, rect.y, rect.width.saturating_sub(1), 1),
+            rect.y,
+            label,
+            Style::default().fg(palette.overlay0),
+        );
     }
 }
 
@@ -967,18 +1073,68 @@ fn shown_thread(snapshot: &ClientShellSnapshot, template: &CommandTemplate) -> O
     template.thread_in(agent_resume(agent)?)
 }
 
+/// A workspace `pane.run_command` created (a new thread from the ticket
+/// picker, or a thread row without a workspace) whose thread pane has not
+/// reported a thread yet: a fresh t3t is a draft until the first prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Draft {
+    pub(super) workspace_id: String,
+    /// The label the server recorded, else the workspace's.
+    pub(super) label: String,
+    /// The workspace is the focused one of its server.
+    pub(super) focused: bool,
+}
+
+/// The draft workspaces of a snapshot (server token `fork.draft`), in
+/// workspace order.
+pub(super) fn drafts(snapshot: &ClientShellSnapshot) -> Vec<Draft> {
+    snapshot
+        .workspaces
+        .iter()
+        .filter_map(|workspace| {
+            let label = token(&workspace.tokens, crate::app::FORK_DRAFT_TOKEN)?;
+            let label = super::fork_threads_feed::sanitize_text(label);
+            Some(Draft {
+                workspace_id: workspace.workspace_id.clone(),
+                label: if label.trim().is_empty() {
+                    super::fork_threads_feed::sanitize_text(&workspace.label)
+                } else {
+                    label
+                },
+                focused: workspace.focused,
+            })
+        })
+        .collect()
+}
+
+/// The panel's lines: the draft rows, then the inbox (`inbox_lines`).
+pub(super) fn panel_lines(
+    rows: &[ThreadRow],
+    now: i64,
+    shelves: &Shelves,
+    shown: Option<&str>,
+    drafts: &[Draft],
+) -> Vec<InboxLine> {
+    let mut lines = (0..drafts.len()).map(InboxLine::Draft).collect::<Vec<_>>();
+    lines.extend(inbox::inbox_lines(rows, now, shelves, shown));
+    lines
+}
+
 /// Sidebar hook: workspaces that own a listed thread show as thread rows
-/// instead. Matches on any machine, by content.
+/// instead, draft workspaces as draft rows. Matches on any machine, by
+/// content.
 pub(super) fn is_hidden_workspace(workspace: &ClientShellWorkspace) -> bool {
     if workspace.tokens.is_empty() {
         return false;
     }
+    let draft = token(&workspace.tokens, crate::app::FORK_DRAFT_TOKEN).is_some();
     VIEW.read().is_ok_and(|view| {
         view.enabled
-            && !view.listed.is_empty()
-            && workspace_threads(workspace, &view.template)
-                .iter()
-                .any(|thread| view.listed.contains(thread))
+            && (draft
+                || (!view.listed.is_empty()
+                    && workspace_threads(workspace, &view.template)
+                        .iter()
+                        .any(|thread| view.listed.contains(thread))))
     })
 }
 
@@ -1087,12 +1243,14 @@ pub(super) fn replace_or_add(
     }
 }
 
-/// What an open opens: a listed thread, or a new thread for a ticket
-/// (the ticket picker).
+/// What an open opens: a listed thread, or a new thread for a ticket or
+/// in a project (the ticket picker).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum OpenTarget {
     Thread(String),
     NewForTicket(String),
+    /// By project id.
+    NewForProject(String),
 }
 
 /// An open waiting for its machine to become the shown one.
@@ -1275,6 +1433,7 @@ impl ClientShellState {
         match ready.map(|open| open.target) {
             Some(OpenTarget::Thread(thread_id)) => self.fork_threads_open(&thread_id, outcome),
             Some(OpenTarget::NewForTicket(label)) => self.fork_tickets_open(&label, outcome),
+            Some(OpenTarget::NewForProject(id)) => self.fork_projects_open(&id, outcome),
             None => {}
         }
     }
@@ -1288,14 +1447,32 @@ impl ClientShellState {
         shown_thread(self.snapshot.as_deref()?, &threads.template)
     }
 
+    /// The thread machine's draft workspaces, as the sidebar draws them.
+    fn fork_threads_drafts(&self) -> Vec<Draft> {
+        let Some(endpoint_id) = machine_endpoint_id(&self.config.threads.machine, &self.endpoints)
+        else {
+            return Vec::new();
+        };
+        let shown = endpoint_id == self.active_endpoint_id;
+        let mut drafts = self
+            .fork_threads_snapshot(&endpoint_id)
+            .map(drafts)
+            .unwrap_or_default();
+        for draft in &mut drafts {
+            draft.focused &= shown;
+        }
+        drafts
+    }
+
     /// The panel's lines as the sidebar draws them now.
     fn fork_threads_lines(&self, view: &ThreadsView) -> Vec<InboxLine> {
         let shown = self.fork_threads_shown();
-        inbox::inbox_lines(
+        panel_lines(
             &view.rows,
             inbox::now_millis(),
             &view.shelves,
             shown.as_deref(),
+            &self.fork_threads_drafts(),
         )
     }
 
@@ -1314,6 +1491,16 @@ impl ClientShellState {
             }
             ThreadHitTarget::ExpandInbox => {
                 update_view(|view| view.shelves.toggle_inbox());
+                outcome.repaint = true;
+            }
+            ThreadHitTarget::Draft(workspace_id) => {
+                if let Some(endpoint_id) = self.fork_threads_machine(outcome) {
+                    self.focus_or_activate(
+                        endpoint_id,
+                        ClientEndpointFocusTarget::Workspace(workspace_id),
+                        outcome,
+                    );
+                }
                 outcome.repaint = true;
             }
         }
@@ -1485,8 +1672,19 @@ impl ClientShellState {
                     InboxLine::Shelf { section, .. } => ThreadHitTarget::Shelf(section),
                     InboxLine::ShowMore(_) => ThreadHitTarget::ShowMore,
                     InboxLine::Expand { .. } => ThreadHitTarget::ExpandInbox,
+                    InboxLine::Draft(index) => {
+                        let drafts = self.fork_threads_drafts();
+                        let Some(draft) = drafts.get(index) else {
+                            clear();
+                            return false;
+                        };
+                        ThreadHitTarget::Draft(draft.workspace_id.clone())
+                    }
                 };
-                if matches!(target, ThreadHitTarget::Thread(_)) {
+                if matches!(
+                    target,
+                    ThreadHitTarget::Thread(_) | ThreadHitTarget::Draft(_)
+                ) {
                     clear();
                     self.mode = self.copy_or_terminal_mode();
                     self.navigate_workspace_id = None;
@@ -1504,15 +1702,21 @@ impl ClientShellState {
                     .map(|target| (target.endpoint_id.clone(), target.workspace_id.clone()));
                 let targets = self.fork_threads_navigation_targets();
                 let cursor = match &current {
-                    // Navigation started on a thread workspace, which the
-                    // list hides: start on that thread's row.
+                    // Navigation started on a thread or draft workspace,
+                    // which the list hides: start on its row.
                     Some(current) if (up || down) && !targets.contains(current) => {
                         let shown = self.fork_threads_shown();
+                        let drafts = self.fork_threads_drafts();
                         lines
                             .iter()
-                            .position(|line| {
-                                matches!(line, InboxLine::Row { index, .. }
-                                    if Some(view.rows[*index].id.as_str()) == shown.as_deref())
+                            .position(|line| match line {
+                                InboxLine::Row { index, .. } => {
+                                    Some(view.rows[*index].id.as_str()) == shown.as_deref()
+                                }
+                                InboxLine::Draft(index) => drafts
+                                    .get(*index)
+                                    .is_some_and(|draft| draft.workspace_id == current.1),
+                                _ => false,
                             })
                             .unwrap_or(if up { count - 1 } else { 0 })
                     }

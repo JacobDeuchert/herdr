@@ -11,7 +11,12 @@
 //! - the client-shell projection adds the pane's current resume command as
 //!   the agent token `fork.resume`.
 //!
-//! Both keys contain a dot, which `*.report_metadata` rejects, so API callers
+//! - a workspace `pane.run_command` creates carries the token `fork.draft`
+//!   (its label) until a pane in it reports a resume command: a fresh t3t is
+//!   a draft that reports its thread only after the first prompt, and the
+//!   client hides the workspace from the start and shows a draft row for it.
+//!
+//! All three keys contain a dot, which `*.report_metadata` rejects, so API callers
 //! can neither forge nor clear them. The history is in-memory only, like all
 //! metadata tokens: after a server restart it is rebuilt as restored agents
 //! report again.
@@ -29,6 +34,9 @@ use crate::api::schema::{
 pub(crate) const SESSIONS_TOKEN: &str = "fork.sessions";
 /// Agent token in the client-shell projection: the pane's resume command.
 pub(crate) const RESUME_TOKEN: &str = "fork.resume";
+/// Workspace token: set (to the workspace label) on a workspace created by
+/// `pane.run_command`, removed once a pane in it reports a resume command.
+pub(crate) const DRAFT_TOKEN: &str = "fork.draft";
 const MAX_SESSIONS: usize = 64;
 const MAX_COMMAND_BYTES: usize = 4096;
 
@@ -70,12 +78,17 @@ impl crate::app::AppState {
         };
         let values = workspace.metadata_tokens.values();
         let history = push_session_line(values.get(SESSIONS_TOKEN).map(String::as_str), &line);
+        let mut patch = std::collections::HashMap::new();
         if values.get(SESSIONS_TOKEN) != Some(&history) {
-            workspace.metadata_tokens.patch(
-                [(SESSIONS_TOKEN.to_owned(), Some(history))].into(),
-                None,
-                std::time::Instant::now(),
-            );
+            patch.insert(SESSIONS_TOKEN.to_owned(), Some(history));
+        }
+        if values.contains_key(DRAFT_TOKEN) {
+            patch.insert(DRAFT_TOKEN.to_owned(), None);
+        }
+        if !patch.is_empty() {
+            workspace
+                .metadata_tokens
+                .patch(patch, None, std::time::Instant::now());
         }
     }
 }
@@ -87,6 +100,27 @@ impl crate::app::App {
         let pane = self.state.workspaces.get(ws_idx)?.pane_state(pane_id)?;
         let terminal = self.state.terminals.get(&pane.attached_terminal_id)?;
         resume_line(&terminal.reported_resume()?.argv)
+    }
+
+    /// Tags a workspace `pane.run_command` created as a draft, with the
+    /// requested label (empty: the client falls back to the workspace's).
+    fn fork_mark_draft(&mut self, public_workspace_id: &str, label: Option<&str>) {
+        let Some(workspace) = self
+            .parse_workspace_id(public_workspace_id)
+            .and_then(|index| self.state.workspaces.get_mut(index))
+        else {
+            return;
+        };
+        let label = label
+            .unwrap_or_default()
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .collect::<String>();
+        workspace.metadata_tokens.patch(
+            [(DRAFT_TOKEN.to_owned(), Some(label))].into(),
+            None,
+            std::time::Instant::now(),
+        );
     }
 
     fn fork_call(&mut self, method: Method) -> Result<ResponseResult, String> {
@@ -189,6 +223,7 @@ impl crate::app::App {
             else {
                 return Err("workspace.create answered unexpectedly".into());
             };
+            self.fork_mark_draft(&root_pane.workspace_id, params.label.as_deref());
             root_pane
         };
         self.fork_call(Method::PaneSendText(PaneSendTextParams {

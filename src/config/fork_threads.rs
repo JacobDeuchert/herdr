@@ -17,10 +17,16 @@ pub const THREAD_PLACEHOLDER: &str = "{thread}";
 /// (`t<digits>`, validated before substitution).
 pub const TICKET_PLACEHOLDER: &str = "{ticket}";
 
+/// Placeholder in `project_command` that is replaced by the project root,
+/// single-quoted (roots with `'` are refused before substitution).
+pub const DIR_PLACEHOLDER: &str = "{dir}";
+
 const DEFAULT_COMMAND: &str = "t3t -r {thread}";
 /// Typed into the new pane's shell (`pane.run_command`), so shell syntax
 /// works. `tk dir` prints the ticket dir and creates it when missing.
 const DEFAULT_NEW_COMMAND: &str = r#"d="$(tk dir {ticket})" && cd "$d" && exec t3t"#;
+/// Typed into the new pane's shell for a ticket-less thread in a project.
+const DEFAULT_PROJECT_COMMAND: &str = "cd {dir} && exec t3t";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
@@ -42,6 +48,10 @@ pub struct ThreadsConfig {
     /// Command a new thread for a picked ticket runs; `{ticket}` is replaced
     /// by the ticket label. Typed into the pane's shell.
     pub new_command: String,
+    /// Command a new thread in a project (the picker's `projects` group)
+    /// runs; `{dir}` is replaced by the single-quoted project root. Typed
+    /// into the pane's shell.
+    pub project_command: String,
 }
 
 impl Default for ThreadsConfig {
@@ -52,6 +62,7 @@ impl Default for ThreadsConfig {
             command: DEFAULT_COMMAND.into(),
             new_key: String::new(),
             new_command: DEFAULT_NEW_COMMAND.into(),
+            project_command: DEFAULT_PROJECT_COMMAND.into(),
         }
     }
 }
@@ -99,6 +110,13 @@ impl ThreadsConfig {
                 "ui.threads.new_command must be one non-empty line; ticket picker disabled".into(),
             );
         }
+        let project = self.project_command.trim();
+        if project.is_empty() || project.chars().any(char::is_control) {
+            return Err(
+                "ui.threads.project_command must be one non-empty line; ticket picker disabled"
+                    .into(),
+            );
+        }
         super::ActionKeybinds::from_labels(&[key.to_string()])
             .map(Some)
             .map_err(|_| format!("invalid ui.threads.new_key: {key}; ticket picker disabled"))
@@ -116,7 +134,11 @@ mod tests {
         assert!(config.diagnostic().is_none());
         assert_eq!(config.command, "t3t -r {thread}");
         assert!(config.new_key.is_empty());
-        assert_eq!(config.new_command, r#"d="$(tk dir {ticket})" && cd "$d" && exec t3t"#);
+        assert_eq!(
+            config.new_command,
+            r#"d="$(tk dir {ticket})" && cd "$d" && exec t3t"#
+        );
+        assert_eq!(config.project_command, "cd {dir} && exec t3t");
         assert!(config.new_keybinds().unwrap().is_none());
     }
 

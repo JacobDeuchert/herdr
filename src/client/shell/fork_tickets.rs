@@ -6,6 +6,11 @@
 //! threads). Typing filters, up/down (also ctrl+n/ctrl+p) move, Enter starts
 //! a new thread for the ticket, Esc closes.
 //!
+//! Below the tickets, a `projects` group lists the t3 projects that are not
+//! ticket dirs (`GET <url>/api/projects`); Enter on one starts a ticket-less
+//! thread in a new workspace in the project root, running `project_command`
+//! with `{dir}` replaced by the single-quoted root.
+//!
 //! A new thread opens like a thread row does (`fork_threads_run`): in the
 //! ticket's workspace on the thread machine, replacing its thread pane in
 //! place or adding one, else in a new workspace labelled with the ticket.
@@ -23,6 +28,7 @@ use super::*;
 use std::sync::{Arc, Mutex};
 
 const MAX_TICKETS: usize = 500;
+const MAX_PROJECTS: usize = 200;
 const MAX_LABEL_DIGITS: usize = 9;
 
 /// One open ticket of the thread service, sanitized.
@@ -85,6 +91,85 @@ pub(crate) fn valid_ticket_label(label: &str) -> bool {
 pub(crate) fn ticket_command(template: &str, label: &str) -> Option<String> {
     (!template.is_empty() && valid_ticket_label(label))
         .then(|| template.replace(crate::config::TICKET_PLACEHOLDER, label))
+}
+
+/// One t3 project of the thread service (not a ticket dir), sanitized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectRow {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    /// Workspace root: absolute, no control characters, no `'`.
+    pub(crate) root: String,
+}
+
+impl ProjectRow {
+    fn matches(&self, terms: &[String]) -> bool {
+        let fields = [self.title.to_lowercase(), self.root.to_lowercase()];
+        terms
+            .iter()
+            .all(|term| fields.iter().any(|field| field.contains(term.as_str())))
+    }
+}
+
+/// Project roots go into a shell command line, single-quoted.
+pub(crate) fn valid_project_root(root: &str) -> bool {
+    root.starts_with('/')
+        && root.len() <= 4096
+        && !root.contains('\'')
+        && !root.chars().any(char::is_control)
+}
+
+/// `project_command` for a project root, or `None` when the root is unsafe.
+pub(crate) fn project_command(template: &str, root: &str) -> Option<String> {
+    (!template.is_empty() && valid_project_root(root))
+        .then(|| template.replace(crate::config::DIR_PLACEHOLDER, &format!("'{root}'")))
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct WireProject {
+    id: Option<String>,
+    title: Option<String>,
+    root: Option<String>,
+}
+
+/// Parses `GET /api/projects`: a JSON array, kept in the service's order
+/// (most recently active first). Items without an id, with an unsafe root
+/// or a repeated id are skipped; an empty title becomes the root's last
+/// component.
+pub(crate) fn parse_projects(body: &[u8]) -> Result<Vec<ProjectRow>, String> {
+    let items: Vec<serde_json::Value> = serde_json::from_slice(body)
+        .map_err(|error| format!("project list is not a JSON array: {error}"))?;
+    let mut projects = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for item in items {
+        if projects.len() >= MAX_PROJECTS {
+            break;
+        }
+        let Ok(project) = serde_json::from_value::<WireProject>(item) else {
+            continue;
+        };
+        let (Some(id), Some(root)) = (project.id, project.root) else {
+            continue;
+        };
+        let id = sanitize_text(&id);
+        if id.is_empty() || !valid_project_root(&root) || !seen.insert(id.clone()) {
+            continue;
+        }
+        let title = sanitize_text(project.title.as_deref().unwrap_or_default());
+        let title = if title.trim().is_empty() {
+            sanitize_text(
+                root.trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&root),
+            )
+        } else {
+            title
+        };
+        projects.push(ProjectRow { id, title, root });
+    }
+    Ok(projects)
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -155,6 +240,49 @@ pub(crate) fn filter_tickets(tickets: &[TicketRow], query: &str) -> Vec<usize> {
         .filter(|(_, ticket)| ticket.matches(&terms))
         .map(|(index, _)| index)
         .collect()
+}
+
+/// Indices of the projects matching `query` (title or root), in list order.
+pub(crate) fn filter_projects(projects: &[ProjectRow], query: &str) -> Vec<usize> {
+    let terms = query
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>();
+    projects
+        .iter()
+        .enumerate()
+        .filter(|(_, project)| project.matches(&terms))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// A selectable picker entry, by index into the list's tickets or projects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PickerItem {
+    Ticket(usize),
+    Project(usize),
+}
+
+/// The entries matching `query`: the tickets, then the projects.
+pub(crate) fn picker_items(list: &TicketList, query: &str) -> Vec<PickerItem> {
+    filter_tickets(&list.tickets, query)
+        .into_iter()
+        .map(PickerItem::Ticket)
+        .chain(
+            filter_projects(&list.projects, query)
+                .into_iter()
+                .map(PickerItem::Project),
+        )
+        .collect()
+}
+
+/// A new thread in a project always gets its own workspace in the project
+/// root, labelled with the project.
+pub(super) fn plan_project_open(project: &ProjectRow) -> OpenPlan {
+    OpenPlan::Create {
+        cwd: Some(project.root.clone()),
+        label: project.title.clone(),
+    }
 }
 
 /// What starting a new thread for `ticket` does on the thread machine. The
@@ -240,6 +368,9 @@ pub(super) fn insert_picker_text(text: &str) -> bool {
 #[derive(Debug, Clone, Default)]
 pub(super) struct TicketList {
     pub(super) tickets: Arc<Vec<TicketRow>>,
+    /// t3 projects for ticket-less threads; empty when the service has no
+    /// project list.
+    pub(super) projects: Arc<Vec<ProjectRow>>,
     pub(super) loading: bool,
     pub(super) offline: bool,
     pub(super) error: Option<String>,
@@ -258,6 +389,7 @@ fn ticket_list() -> TicketList {
         offline: error.is_some(),
         error,
         tickets: feed.tickets,
+        projects: feed.projects,
     }
 }
 
@@ -280,26 +412,34 @@ fn current_list() -> TicketList {
     ticket_list()
 }
 
-/// A line of the picker list: the `parked` group header (not selectable)
-/// or a ticket, as its position in the filtered list.
+/// A line of the picker list: a group header (`parked`, `projects`; not
+/// selectable) or an entry, as its position in the item list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PickerLine {
     ParkedHeader,
-    Ticket(usize),
+    ProjectsHeader,
+    Item(usize),
 }
 
-/// The list lines for `filtered` (indices into `tickets`, in list order):
-/// started tickets, then a `parked` header and the parked ones. The header
-/// is left out when no parked ticket matches.
-pub(crate) fn picker_lines(tickets: &[TicketRow], filtered: &[usize]) -> Vec<PickerLine> {
-    let mut lines = Vec::with_capacity(filtered.len() + 1);
-    let mut header = false;
-    for (position, index) in filtered.iter().enumerate() {
-        if !header && tickets[*index].parked() {
-            lines.push(PickerLine::ParkedHeader);
-            header = true;
+/// The list lines for `items` (in list order): started tickets, then a
+/// `parked` header and the parked ones, then a `projects` header and the
+/// projects. A header is left out when its group is empty.
+pub(crate) fn picker_lines(list: &TicketList, items: &[PickerItem]) -> Vec<PickerLine> {
+    let mut lines = Vec::with_capacity(items.len() + 2);
+    let (mut parked, mut projects) = (false, false);
+    for (position, item) in items.iter().enumerate() {
+        match item {
+            PickerItem::Ticket(index) if !parked && list.tickets[*index].parked() => {
+                lines.push(PickerLine::ParkedHeader);
+                parked = true;
+            }
+            PickerItem::Project(_) if !projects => {
+                lines.push(PickerLine::ProjectsHeader);
+                projects = true;
+            }
+            _ => {}
         }
-        lines.push(PickerLine::Ticket(position));
+        lines.push(PickerLine::Item(position));
     }
     lines
 }
@@ -308,10 +448,10 @@ pub(crate) fn picker_lines(tickets: &[TicketRow], filtered: &[usize]) -> Vec<Pic
 pub(super) struct PickerView {
     pub(super) query: TextEditor,
     pub(super) list: TicketList,
-    /// Indices into `list.tickets`, in display order.
-    pub(super) filtered: Vec<usize>,
+    /// The matching entries, in display order.
+    pub(super) items: Vec<PickerItem>,
     pub(super) selected: usize,
-    /// What Enter does for the selected ticket, in words.
+    /// What Enter does for the selected entry, in words.
     pub(super) action: Option<String>,
 }
 
@@ -366,7 +506,7 @@ impl ClientShellState {
             return true;
         };
         outcome.repaint = true;
-        let filtered = filter_tickets(&list.tickets, &picker.query);
+        let filtered = picker_items(&list, &picker.query);
         let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
         let ctrl = modifiers == KeyModifiers::CONTROL;
         let plain = modifiers.is_empty();
@@ -382,13 +522,20 @@ impl ClientShellState {
                 picker.selected = (picker.selected + 1).min(filtered.len().saturating_sub(1))
             }
             KeyCode::Enter => {
-                let label = filtered
+                let item = filtered
                     .get(picker.selected.min(filtered.len().saturating_sub(1)))
-                    .map(|index| list.tickets[*index].label.clone());
-                if let Some(label) = label {
+                    .copied();
+                if let Some(item) = item {
                     *guard = None;
                     drop(guard);
-                    self.fork_tickets_open(&label, outcome);
+                    match item {
+                        PickerItem::Ticket(index) => {
+                            self.fork_tickets_open(&list.tickets[index].label, outcome)
+                        }
+                        PickerItem::Project(index) => {
+                            self.fork_projects_open(&list.projects[index].id, outcome)
+                        }
+                    }
                 }
             }
             _ => {
@@ -442,19 +589,47 @@ impl ClientShellState {
         );
     }
 
+    /// Starts a ticket-less thread in the project with id `project_id`, in a
+    /// new workspace on the thread machine.
+    pub(super) fn fork_projects_open(&mut self, project_id: &str, outcome: &mut ClientShellInput) {
+        let list = current_list();
+        let Some(project) = list
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+        else {
+            return;
+        };
+        let Some(endpoint_id) = self.fork_threads_machine(outcome) else {
+            return;
+        };
+        let command = project_command(&self.config.threads.project_command, &project.root);
+        self.fork_threads_run(
+            endpoint_id,
+            Some(plan_project_open(project)),
+            command,
+            OpenTarget::NewForProject(project.id.clone()),
+            outcome,
+        );
+    }
+
     /// The picker as the overlay draws it, `None` when closed.
     pub(super) fn fork_tickets_view(&self) -> Option<PickerView> {
         let guard = PICKER.lock().ok()?;
         let picker = guard.as_ref()?;
         let list = current_list();
-        let filtered = filter_tickets(&list.tickets, &picker.query);
-        let selected = picker.selected.min(filtered.len().saturating_sub(1));
-        let action = filtered
-            .get(selected)
-            .map(|index| self.fork_tickets_action(&list.tickets[*index]));
+        let items = picker_items(&list, &picker.query);
+        let selected = picker.selected.min(items.len().saturating_sub(1));
+        let action = items.get(selected).map(|item| match item {
+            PickerItem::Ticket(index) => self.fork_tickets_action(&list.tickets[*index]),
+            PickerItem::Project(index) => {
+                let project = &list.projects[*index];
+                format!("new workspace {} in {}", project.title, project.root)
+            }
+        });
         Some(PickerView {
             query: picker.query.clone(),
-            filtered,
+            items,
             selected,
             action,
             list,

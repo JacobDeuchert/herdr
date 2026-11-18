@@ -2,7 +2,8 @@
 //!
 //! One background thread per client process follows `GET <url>/api/events`
 //! (server-sent events) and refetches `GET <url>/api/sessions` (and, with the
-//! ticket picker on, `GET <url>/api/tickets`) whenever the `stamp` event's
+//! ticket picker on, `GET <url>/api/tickets` and `GET <url>/api/projects`)
+//! whenever the `stamp` event's
 //! data changes. Nothing polls: a refetch happens on connect
 //! and on each new stamp. When the service drops or fails, the last rows stay
 //! and are marked stale until a reconnect (with backoff) succeeds.
@@ -703,6 +704,13 @@ pub(crate) fn fetch_tickets(url: &HttpUrl) -> Result<Vec<super::fork_tickets::Ti
     super::fork_tickets::parse_tickets(&fetch_body(url, "/api/tickets")?)
 }
 
+/// fork: ticket picker, projects group (FORK.md 0005).
+pub(crate) fn fetch_projects(
+    url: &HttpUrl,
+) -> Result<Vec<super::fork_tickets::ProjectRow>, String> {
+    super::fork_tickets::parse_projects(&fetch_body(url, "/api/projects")?)
+}
+
 /// Incremental server-sent-events parser. Yields `(event, data)` per
 /// dispatched event; comments and unknown fields are ignored.
 #[derive(Default)]
@@ -761,6 +769,10 @@ pub(crate) struct FeedState {
     pub(crate) tickets_loaded: bool,
     /// The last ticket fetch failed; `tickets` are the last known ones.
     pub(crate) tickets_error: Option<String>,
+    /// t3 projects for the picker's `projects` group. A failing fetch (a
+    /// service without `/api/projects`) keeps the last known ones and does
+    /// not mark the picker offline.
+    pub(crate) projects: Arc<Vec<super::fork_tickets::ProjectRow>>,
 }
 
 struct Reader {
@@ -955,6 +967,9 @@ fn follow_events(
                 }
                 Err(error) => state.tickets_error = Some(error),
             });
+            if let Ok(projects) = fetch_projects(url) {
+                update(state, |state| state.projects = Arc::new(projects));
+            }
         }
     }
 }
@@ -1181,6 +1196,7 @@ mod tests {
         pub(crate) url: String,
         pub(crate) body: Arc<Mutex<String>>,
         pub(crate) tickets: Arc<Mutex<String>>,
+        pub(crate) projects: Arc<Mutex<String>>,
         stamp: Arc<Mutex<u64>>,
         streams: Arc<Mutex<Vec<TcpStream>>>,
         pub(crate) listener_alive: Arc<AtomicBool>,
@@ -1192,6 +1208,8 @@ mod tests {
             let url = format!("http://{}", listener.local_addr().unwrap());
             let body = Arc::new(Mutex::new(body));
             let tickets = Arc::new(Mutex::new(String::from("[]")));
+            let projects = Arc::new(Mutex::new(String::from("[]")));
+            let thread_projects = Arc::clone(&projects);
             let stamp = Arc::new(Mutex::new(1));
             let streams = Arc::new(Mutex::new(Vec::new()));
             let listener_alive = Arc::new(AtomicBool::new(true));
@@ -1229,6 +1247,12 @@ mod tests {
                             stream,
                             "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{body}"
                         );
+                    } else if first.starts_with("GET /api/projects ") {
+                        let body = thread_projects.lock().unwrap().clone();
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{body}"
+                        );
                     } else if first.starts_with("GET /api/events") {
                         let stamp = *thread_stamp.lock().unwrap();
                         let _ = write!(
@@ -1245,6 +1269,7 @@ mod tests {
                 url,
                 body,
                 tickets,
+                projects,
                 stamp,
                 streams,
                 listener_alive,
@@ -1302,6 +1327,8 @@ mod tests {
 
         *service.tickets.lock().unwrap() =
             r#"[{"label":"t3","id":3,"title":"T","status":"todo"}]"#.into();
+        *service.projects.lock().unwrap() =
+            r#"[{"id":"p1","title":"nvim","root":"/src/nvim","activity_at":null}]"#.into();
 
         *service.body.lock().unwrap() = format!(
             "[{},{}]",
@@ -1312,8 +1339,11 @@ mod tests {
             session_json("t1", None, "idle")
         );
         service.bump();
-        let state = wait_for(|state| state.rows.len() == 2 && state.tickets.len() == 1);
+        let state = wait_for(|state| {
+            state.rows.len() == 2 && state.tickets.len() == 1 && state.projects.len() == 1
+        });
         assert_eq!(state.tickets[0].label, "t3");
+        assert_eq!(state.projects[0].root, "/src/nvim");
         assert_eq!(state.rows[0].id, "t2");
         assert!(state.rows[0].inbox.from_service && state.rows[0].inbox.settled);
         assert_eq!(state.rows[0].inbox.status, RowStatus::Input);

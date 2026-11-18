@@ -54,7 +54,8 @@ use crate::events::AppEvent;
 pub use state::{AppState, Mode, ToastKind, ViewState};
 // fork: FORK.md 0005
 pub(crate) use fork_threads::{
-    RESUME_TOKEN as FORK_RESUME_TOKEN, SESSIONS_TOKEN as FORK_SESSIONS_TOKEN,
+    DRAFT_TOKEN as FORK_DRAFT_TOKEN, RESUME_TOKEN as FORK_RESUME_TOKEN,
+    SESSIONS_TOKEN as FORK_SESSIONS_TOKEN,
 };
 
 pub(crate) fn load_plugin_manifest(

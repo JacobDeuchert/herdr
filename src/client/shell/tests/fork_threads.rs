@@ -212,6 +212,7 @@ fn threads_inbox_sorts_each_section() {
             }
             InboxLine::ShowMore(count) => format!("[more {count}]"),
             InboxLine::Expand { hidden, open } => format!("[expand {hidden} {open}]"),
+            InboxLine::Draft(index) => format!("[draft {index}]"),
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -247,6 +248,7 @@ fn inbox_names(rows: &[ThreadRow], shelves: &Shelves, shown: Option<&str>) -> Ve
             }
             InboxLine::ShowMore(count) => format!("[more {count}]"),
             InboxLine::Expand { hidden, open } => format!("[expand {hidden} {open}]"),
+            InboxLine::Draft(index) => format!("[draft {index}]"),
         })
         .collect()
 }
@@ -861,6 +863,96 @@ fn threads_mapped_workspaces_hide_until_their_threads_leave_the_list() {
     let mut state = state;
     state.compose(100, 30).unwrap();
     assert_eq!(state.hits.workspaces.len(), 3);
+}
+
+/// mapped_snapshot plus ws_4, a draft labelled `t13` (focused).
+fn draft_snapshot() -> ClientShellSnapshot {
+    let mut projected = mapped_snapshot();
+    let mut draft = projected.workspaces[0].clone();
+    draft.workspace_id = "ws_4".into();
+    draft.number = 4;
+    draft.label = "space 4".into();
+    draft.tokens = vec![(crate::app::FORK_DRAFT_TOKEN.to_owned(), "t13".to_owned())];
+    for workspace in &mut projected.workspaces {
+        workspace.focused = false;
+    }
+    draft.focused = true;
+    projected.workspaces.push(draft);
+    projected.focused_workspace_id = Some("ws_4".into());
+    projected
+}
+
+fn draft_state() -> ClientShellState {
+    fork_threads::set_view_for_test(sample_threads(), false);
+    let mut state = ClientShellState::new(threads_config(""));
+    state.config.palette = Palette::terminal();
+    state.set_snapshot(Box::new(draft_snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(100, 30).unwrap();
+    state
+}
+
+#[test]
+fn threads_draft_workspaces_hide_and_show_as_draft_rows() {
+    let mut state = draft_state();
+    let listed = state
+        .hits
+        .workspaces
+        .iter()
+        .map(|hit| hit.workspace_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(listed, ["ws_1", "ws_3"], "the draft is not in the list");
+    let rows = frame_rows(&state.compose(100, 30).unwrap());
+    let draft = line_of(&rows, "t13");
+    assert!(rows[draft].contains("draft"), "{rows:#?}");
+    assert!(
+        draft < line_of(&rows, "thread t2"),
+        "drafts sit above the inbox"
+    );
+    assert!(state
+        .hits
+        .fork_threads
+        .iter()
+        .any(|hit| hit.target == fork_threads::ThreadHitTarget::Draft("ws_4".into())));
+
+    // Without a thread service the token does not hide anything.
+    fork_threads::update_view(|view| view.enabled = false);
+    state.compose(100, 30).unwrap();
+    assert_eq!(state.hits.workspaces.len(), 4);
+}
+
+#[test]
+fn threads_draft_row_click_and_enter_show_its_workspace() {
+    let mut state = draft_state();
+    let rect = state
+        .hits
+        .fork_threads
+        .iter()
+        .find(|hit| hit.target == fork_threads::ThreadHitTarget::Draft("ws_4".into()))
+        .unwrap()
+        .rect;
+    let outcome =
+        state.handle_raw_events(vec![crate::raw_input::RawInputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x + 3,
+            row: rect.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert!(
+        outcome.actions.iter().any(|action| matches!(action,
+            ClientShellAction::Endpoint { request, .. }
+                if matches!(&request.method, crate::api::schema::Method::WorkspaceFocus(target)
+                    if target.workspace_id == "ws_4"))),
+        "{:?}",
+        outcome.actions
+    );
+
+    // Navigate mode started on the (hidden) draft workspace lands on its row.
+    let mut state = draft_state();
+    state.mode = ClientShellMode::Navigate;
+    state.navigate_workspace_id = state.navigation_target(&ClientEndpointId::Local, "ws_4");
+    state.handle_input_bytes(b"\x1b[B");
+    assert_eq!(fork_threads::view().cursor, Some(0));
 }
 
 #[test]

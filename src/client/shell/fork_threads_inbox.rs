@@ -206,6 +206,10 @@ pub(crate) enum InboxLine {
     /// Under the capped inbox rows: "Show N more" (closed, `hidden` rows
     /// left out) or "Show less" (open).
     Expand { hidden: usize, open: bool },
+    /// A draft thread workspace (a fresh t3t that has not reported a thread
+    /// yet), by index into the client's draft list. Never produced by
+    /// `inbox_lines`; the client puts these above the inbox.
+    Draft(usize),
 }
 
 /// Rows that stay visible past the inbox cap: they need Jacob (D4).

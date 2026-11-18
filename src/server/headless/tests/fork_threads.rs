@@ -165,6 +165,18 @@ async fn threads_run_command_creates_a_labelled_workspace() {
         Some("PROJ-7")
     );
     assert_eq!(server.app.state.active, Some(2));
+    // The new workspace is a draft until a pane in it reports a resume.
+    let draft = |server: &HeadlessServer| {
+        let snapshot = crate::server::client_shell::snapshot(&server.app, "boot", 1, None, None);
+        token(&snapshot.workspaces[2].tokens, crate::app::FORK_DRAFT_TOKEN).map(str::to_owned)
+    };
+    assert_eq!(draft(&server).as_deref(), Some("PROJ-7"));
+    let pane_id = response["result"]["pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    report_resume(&mut server, &pane_id, 1, "fresh");
+    assert_eq!(draft(&server), None);
 
     let rejected = call(
         &mut server,
