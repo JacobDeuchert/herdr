@@ -426,7 +426,10 @@ impl RowLabel {
             Self::Request => "Request".into(),
             Self::Waiting(detail) => with("Waiting", detail),
             Self::SettingUp(detail) => with("Setting up", detail),
-            Self::Working(detail) => with("Working", detail),
+            // Only the duration: the colour and the Working section already
+            // say it is working, and the word cost most of a narrow row.
+            Self::Working(Some(detail)) => detail.clone(),
+            Self::Working(None) => "Working".into(),
             Self::Goal(detail) => with("Goal", detail),
             Self::Limited => "Limited".into(),
             Self::Failed => "Failed".into(),

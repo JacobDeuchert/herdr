@@ -388,7 +388,7 @@ fn threads_inbox_row_labels_follow_the_status_rules() {
         label(with(card(RowStatus::Working), |inbox| inbox
             .working_started_at =
             Some(now - 42_000))),
-        "Working 42s"
+        "42s"
     );
     assert_eq!(
         label(with(card(RowStatus::Working), |inbox| {
