@@ -81,6 +81,52 @@ fn assert_pane_close(outcome: &ClientShellInput) {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn settle_close_requires_ack_and_an_unchanged_thread() {
+    for (helper, changed, mouse) in [
+        ("test", false, true),
+        ("false", false, false),
+        ("test", true, false),
+    ] {
+        let mut state = close_state(false, 2);
+        state.config.threads.template =
+            super::super::fork_threads::CommandTemplate::parse("t3t -r {thread}").unwrap();
+        // `test thread-A = <appended id>` checks that the helper receives the exact target.
+        state.config.threads.settle_command = vec![helper.into(), "thread-A".into(), "=".into()];
+        let mut projected = state.snapshot.as_deref().unwrap().clone();
+        projected.agents.push(super::fork_threads::agent(
+            "pane_1",
+            "ws_1",
+            Some("t3t -r thread-A"),
+            true,
+        ));
+        state.set_snapshot(Box::new(projected.clone()));
+        assert_no_close(&request_close(&mut state, mouse));
+        let text = frame_rows(&state.compose(106, 24).unwrap()).join("\n");
+        assert!(text.contains("settle & close") && text.contains("thread-A"));
+        let start = if mouse {
+            let settle = state.hits.overlay_clear;
+            click(&mut state, settle)
+        } else {
+            state.handle_input_bytes(b"s")
+        };
+        assert_no_close(&start);
+        state.settling.as_mut().unwrap().2.wait().unwrap();
+        if changed {
+            projected.agents.clear();
+            state.set_snapshot(Box::new(projected));
+        }
+        let mut result = ClientShellInput::default();
+        state.poll_settle_close(&mut result);
+        if helper == "test" && !changed {
+            assert_pane_close(&result);
+        } else {
+            assert_no_close(&result);
+        }
+    }
+}
+
 #[test]
 fn last_pane_close_waits_for_keyboard_or_mouse_confirmation() {
     for menu in [false, true] {

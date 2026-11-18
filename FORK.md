@@ -804,6 +804,20 @@ real tkd, t3t or devvm yet.
 
 ---
 
+### 0005 addendum: settle a thread when closing its pane
+
+`[ui.threads] settle_command` is an optional client-side argv array, e.g.
+`["ssh", "-o", "BatchMode=yes", "devvm", "t3t", "--settle"]` for the VM,
+or `["t3t", "--settle"]` locally. Install the `t3t` build with `--settle`
+on the helper machine. Herdr appends the reported thread ID as one argument.
+The helper must target the same T3 server as the pane and exit zero only on
+acknowledged settlement. Explicit `t3t --server` overrides are excluded.
+
+Closing a matching T3 pane offers **Enter: close only**, **s: settle &
+close**, and **Esc: cancel**, including with `confirm_close` off. A failed
+helper, timeout or changed target leaves the pane open. The thread list
+continues to refresh from the read-only feed.
+
 ## Not patched, deliberately
 
 Things the tmux config used to do that this fork does *not* try to restore:

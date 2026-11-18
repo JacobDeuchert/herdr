@@ -23,6 +23,7 @@ use std::sync::{Arc, LazyLock, RwLock};
 pub(crate) struct ClientThreads {
     pub(super) url: String,
     pub(super) machine: String,
+    pub(super) settle_command: Vec<String>,
     pub(super) template: CommandTemplate,
     /// Ticket picker key (`new_key`); `None` leaves the picker off.
     pub(super) new_key: Option<crate::config::ActionKeybinds>,
@@ -45,6 +46,7 @@ impl ClientThreads {
             Self {
                 url: config.url.trim().trim_end_matches('/').to_owned(),
                 machine: config.machine.trim().to_owned(),
+                settle_command: config.settle_command.clone(),
                 template: CommandTemplate::parse(&config.command).unwrap_or_default(),
                 new_command: config.new_command.trim().to_owned(),
                 project_command: config.project_command.trim().to_owned(),
@@ -1411,6 +1413,7 @@ impl ClientShellState {
     /// (snooze ends, relative times) only when its next change is due, and
     /// finishes an open that waited for its machine.
     pub(crate) fn fork_threads_tick(&mut self, outcome: &mut ClientShellInput) {
+        self.poll_settle_close(outcome);
         if !self.config.threads.enabled() {
             return;
         }
@@ -1436,6 +1439,31 @@ impl ClientShellState {
             Some(OpenTarget::NewForProject(id)) => self.fork_projects_open(&id, outcome),
             None => {}
         }
+    }
+
+    /// Only offer settlement for a live T3 agent on the configured machine.
+    pub(super) fn settle_thread_for_pane(&self, pane_id: &str) -> Option<String> {
+        let threads = &self.config.threads;
+        if threads.settle_command.is_empty()
+            || machine_endpoint_id(&threads.machine, &self.endpoints)? != self.active_endpoint_id
+        {
+            return None;
+        }
+        let agent = self
+            .snapshot
+            .as_deref()?
+            .agents
+            .iter()
+            .find(|a| a.pane_id == pane_id && a.agent.as_deref() == Some("t3code"))?;
+        let line = agent_resume(agent)?;
+        // The helper targets its configured server. Don't send an override thread to it.
+        if line
+            .split_whitespace()
+            .any(|arg| arg == "--server" || arg.starts_with("--server="))
+        {
+            return None;
+        }
+        threads.template.thread_in(line)
     }
 
     /// The thread on screen (focused pane of the thread machine), if any.

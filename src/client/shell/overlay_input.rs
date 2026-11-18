@@ -895,6 +895,8 @@ impl ClientShellState {
         if matches!(self.overlay, Some(ClientShellOverlay::ConfirmClose(_))) {
             if key.code == KeyCode::Enter {
                 self.accept_close_confirmation(outcome);
+            } else if key.code == KeyCode::Char('s') {
+                self.accept_settle_close(outcome);
             } else if key.code == KeyCode::Esc {
                 self.overlay = None;
                 self.mode = ClientShellMode::Navigate;
@@ -1032,6 +1034,48 @@ impl ClientShellState {
     }
 
     pub(super) fn request_pane_close(&mut self, pane_id: String, outcome: &mut ClientShellInput) {
+        if let Some(thread) = self.settle_thread_for_pane(&pane_id) {
+            let Some(snapshot) = self.snapshot.as_deref() else {
+                return;
+            };
+            let Some(pane) = snapshot.panes.iter().find(|pane| pane.pane_id == pane_id) else {
+                return;
+            };
+            let Some(workspace) =
+                self.navigation_target(&self.active_endpoint_id, &pane.workspace_id)
+            else {
+                return;
+            };
+            let last = !snapshot
+                .panes
+                .iter()
+                .any(|p| p.workspace_id == pane.workspace_id && p.pane_id != pane_id)
+                && !snapshot
+                    .tabs
+                    .iter()
+                    .any(|t| t.workspace_id == pane.workspace_id && t.tab_id != pane.tab_id);
+            self.overlay = Some(ClientShellOverlay::ConfirmClose(
+                ClientConfirmCloseOverlay {
+                    workspace_id: pane.workspace_id.clone(),
+                    close_group: false,
+                    tab_target: Some(ClientTabCloseConfirmation {
+                        workspace,
+                        tab_id: pane.tab_id.clone(),
+                        pane_id: Some(pane_id),
+                    }),
+                    title: if last {
+                        "Close last pane in workspace?"
+                    } else {
+                        "Close pane?"
+                    }
+                    .into(),
+                    detail: format!("T3 thread: {thread}"),
+                    thread: Some(thread),
+                },
+            ));
+            outcome.repaint = true;
+            return;
+        }
         let target = self.snapshot.as_deref().and_then(|snapshot| {
             let pane = snapshot.panes.iter().find(|pane| pane.pane_id == pane_id)?;
             let tab = snapshot
@@ -1215,6 +1259,7 @@ impl ClientShellState {
         };
         self.overlay = Some(ClientShellOverlay::ConfirmClose(
             ClientConfirmCloseOverlay {
+                thread: None,
                 workspace_id,
                 close_group: closes_group,
                 tab_target,

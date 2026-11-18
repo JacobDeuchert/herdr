@@ -1731,7 +1731,9 @@ impl ClientShellState {
                     _ => {}
                 }
             } else if super::contains(self.hits.overlay_clear, point) {
-                if let Some(ClientShellOverlay::Rename(rename)) = self.overlay.as_mut() {
+                if matches!(self.overlay, Some(ClientShellOverlay::ConfirmClose(_))) {
+                    self.accept_settle_close(outcome);
+                } else if let Some(ClientShellOverlay::Rename(rename)) = self.overlay.as_mut() {
                     rename.input.clear();
                     outcome.repaint = true;
                 }

@@ -1282,14 +1282,30 @@ fn render_confirm_close_overlay(
         &format!(" {}", c.detail),
         Style::default().fg(p.text).bg(p.panel_bg),
     );
-    let rs = row(i, &[13, 12], 2, 3);
-    let [ok, cancel] = rs.as_slice() else {
-        return None;
+    let widths: &[u16] = if c.thread.is_some() {
+        &[14, 12, 20]
+    } else {
+        &[13, 12]
     };
+    let rs = row(i, widths, 2, 3);
+    let (ok, cancel) = (&rs[0], &rs[1]);
+    let settle = rs.get(2).copied().unwrap_or_default();
+    if c.thread.is_some() {
+        button(
+            b,
+            settle,
+            "s settle & close",
+            Style::default().fg(p.text).bg(p.surface0),
+        );
+    }
     button(
         b,
         *ok,
-        " ↵ confirm ",
+        if c.thread.is_some() {
+            "↵ close only"
+        } else {
+            " ↵ confirm "
+        },
         Style::default()
             .fg(contrast(p))
             .bg(p.red)
@@ -1307,7 +1323,7 @@ fn render_confirm_close_overlay(
     Some(OverlayRender {
         area: q,
         primary: *ok,
-        clear: Rect::default(),
+        clear: settle,
         cancel: *cancel,
         navigator_popup: Rect::default(),
         navigator_search: Rect::default(),

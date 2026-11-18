@@ -42,6 +42,8 @@ pub struct ThreadsConfig {
     /// The same pattern recognises which thread an existing pane shows, from
     /// the resume command the pane reported.
     pub command: String,
+    /// Client-side helper argv. Herdr appends the exact thread id; exit 0 confirms settlement.
+    pub settle_command: Vec<String>,
     /// Binding that opens the ticket picker, e.g. "prefix+t". Empty (default)
     /// leaves the picker off.
     pub new_key: String,
@@ -60,6 +62,7 @@ impl Default for ThreadsConfig {
             url: String::new(),
             machine: String::new(),
             command: DEFAULT_COMMAND.into(),
+            settle_command: Vec::new(),
             new_key: String::new(),
             new_command: DEFAULT_NEW_COMMAND.into(),
             project_command: DEFAULT_PROJECT_COMMAND.into(),

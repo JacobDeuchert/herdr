@@ -734,7 +734,12 @@ fn template() -> fork_threads::CommandTemplate {
     fork_threads::CommandTemplate::parse("t3t -r {thread}").unwrap()
 }
 
-fn agent(pane: &str, workspace: &str, resume: Option<&str>, focused: bool) -> ClientShellAgent {
+pub(super) fn agent(
+    pane: &str,
+    workspace: &str,
+    resume: Option<&str>,
+    focused: bool,
+) -> ClientShellAgent {
     ClientShellAgent {
         pane_id: pane.into(),
         workspace_id: workspace.into(),

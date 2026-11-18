@@ -580,6 +580,7 @@ pub(super) struct ClientTabCloseConfirmation {
 
 #[derive(Debug)]
 pub(super) struct ClientConfirmCloseOverlay {
+    pub(super) thread: Option<String>,
     pub(super) workspace_id: String,
     pub(super) close_group: bool,
     pub(super) tab_target: Option<ClientTabCloseConfirmation>,
@@ -865,6 +866,12 @@ pub(super) struct ClientCopyModeState {
 }
 
 pub(crate) struct ClientShellState {
+    pub(super) settling: Option<(
+        ClientTabCloseConfirmation,
+        String,
+        std::process::Child,
+        std::time::Instant,
+    )>,
     pub(super) machine_diagnostics: super::machine_diagnostics::MachineDiagnostics,
     pub(super) config: ClientShellConfig,
     pub(super) snapshot: Option<Box<ClientShellSnapshot>>,
@@ -1089,6 +1096,7 @@ impl ClientShellState {
             pending_workspace_highlight: None,
             reveal_navigation_workspace: false,
             overlay,
+            settling: None,
             previous_pane_id: None,
             pane_mouse_gesture: None,
             link_hover: None,
