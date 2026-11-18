@@ -546,6 +546,9 @@ command = "t3t -r {thread}"      # pane command; {thread} = thread id
   `{thread}`; so `t3t --server x -r <id>` matches too). Keys contain a dot,
   which `*.report_metadata` rejects: API callers cannot forge or clear them.
   Workspace metadata is in-memory, so the mapping dies with the workspace.
+- Drafts (2026-11-17, see the addendum): `workspace_entries` also drops a
+  workspace with the token `fork.draft`, and the panel lists it as a draft
+  row above the inbox.
 - Hiding: `workspace_entries` drops a workspace whose history names a thread
   that is listed (any machine, by content). When none of its threads is
   listed any more it is a normal workspace again. Nothing closes.
@@ -642,7 +645,7 @@ opens; wheel scrolls; `flat` data → one active list by `updated_at` with
 `Working 1` and `Settled 0`; stub down → `offline`, rows kept; stub up →
 recovered. Not verified: a real remote machine, the real tkd.
 
-### 0005 addendum: ticket picker (`[ui.threads] new_key`)
+### 0005 addendum: ticket picker (`[ui.threads] new_key`), projects, drafts
 
 Part of 0005; reapply it after the main entry. Added 2026-11-17 (decided by
 Jacob the same day).
@@ -669,12 +672,14 @@ touched files (each hook is marked `// fork: FORK.md 0005`):
 | `src/client/shell/tests/mod.rs` | test `mod` list | `mod fork_tickets;` |
 
 plus, inside the 0005 files: `ThreadsConfig::{new_key, new_command,
-new_keybinds}` and `TICKET_PLACEHOLDER` (exported from `src/config.rs`);
-`ClientThreads::{new_key, new_command}`; the reader fetches tickets
+project_command, new_keybinds}`, `TICKET_PLACEHOLDER` and `DIR_PLACEHOLDER`
+(exported from `src/config.rs`); `DRAFT_TOKEN` (re-exported from
+`src/app/mod.rs` as `FORK_DRAFT_TOKEN`); `InboxLine::Draft`;
+`ClientThreads::{new_key, new_command, project_command}`; the reader fetches tickets
 (`ensure_reader(url, tickets)`, `FeedState::tickets*`); `fork_threads_open`
 split into `fork_threads_machine` + `fork_threads_run` (shared with the
 picker); `replace_or_add` split out of `plan_open`; the pending open holds an
-`OpenTarget` (`Thread(id)` | `NewForTicket(label)`).
+`OpenTarget` (`Thread(id)` | `NewForTicket(label)` | `NewForProject(id)`).
 
 behaviour:
 
@@ -682,6 +687,7 @@ behaviour:
 [ui.threads]
 new_key = "prefix+t"                                  # empty (default): picker off
 new_command = 'd="$(tk dir {ticket})" && cd "$d" && exec t3t'   # default; {ticket} = ticket label
+project_command = "cd {dir} && exec t3t"              # default; {dir} = project root, single-quoted
 ```
 
 - Data: with `new_key` set, the reader also fetches `GET <url>/api/tickets`
@@ -690,10 +696,19 @@ new_command = 'd="$(tk dir {ticket})" && cd "$d" && exec t3t'   # default; {tick
   dropped; so are items whose `label` is not `t<digits>` (it ends up in a
   shell command line). Title, status and `extRef` are sanitized like thread
   titles; `dir` is kept only when absolute and free of control characters.
+- Projects (added 2026-11-17): the reader also fetches `GET
+  <url>/api/projects` (tkd: t3 projects that are not ticket dirs, most
+  recently active first) after the tickets; a failing fetch keeps the last
+  list and does not mark the picker offline. Items without an id, with a
+  root that is not absolute, has a control character or a `'`, and repeats
+  are dropped; an empty title becomes the root's last component.
 - Order: started tickets (in-progress / in-review, then any other
   non-parked status), then a dim, unselectable `parked` header and the
-  parked ones (todo, then draft); label number descending inside each. The
-  header is left out when its group is empty after filtering.
+  parked ones (todo, then draft); label number descending inside each; then
+  a dim `projects` header and the projects in the service's order. A header
+  is left out when its group is empty after filtering. The filter also
+  matches project titles and roots; the count reads `N tickets · M
+  projects`.
 - Picker: `new_key` in Terminal or Prefix mode (checked before the regular
   bindings, like 0004's key, so it wins over `[keys]` and over a shown
   machine's `[[keys.command]]`) opens a modal centred over the current view,
@@ -715,6 +730,23 @@ new_command = 'd="$(tk dir {ticket})" && cd "$d" && exec t3t'   # default; {tick
   `dir` when set. Command: `new_command` with `{ticket}` replaced after the
   label passed `^t[0-9]+$`. Same `fork_threads_run` path as a thread row,
   including showing the machine first and finishing on the client timer.
+- Enter on a project: always a new workspace labelled with the project
+  title, `cwd` = the root, command `project_command` with `{dir}` replaced
+  by the root in single quotes. Same run path (`OpenTarget::NewForProject`).
+- Drafts: a workspace `pane.run_command` creates (picker or a thread row
+  without a workspace) gets the server token `fork.draft` = the requested
+  label; the server removes it when a pane in the workspace reports a
+  resume command. The client hides such a workspace from the workspace
+  lists at once (any machine, by content, while `[ui.threads]` is on) and
+  draws the thread machine's drafts as one-line rows above the inbox:
+  `◌ label … draft`, highlighted when it is the focused workspace of the
+  shown thread machine. Click or navigate-mode Enter shows the workspace
+  (`workspace.focus` via `focus_or_activate`); navigate mode started on a
+  draft workspace lands on its row. Drafts are not in the
+  `next_agent`/`focus_agent` cycle and not in collapsed sidebars. Reason:
+  without it the new workspace sat in the workspace list until the first
+  prompt and then jumped to the thread panel (workflow-hub D41 amendment
+  2026-11-17).
 - `pane.run_command` types the command + CR into the new pane's
   interactive shell (`pane.send_text`), so `new_command` is shell syntax
   and needs no `sh -c`. A fresh `t3t` is a draft and reports its thread
@@ -734,7 +766,10 @@ part of `[keys]`: no collision diagnostic, not in help or settings. A
 `new_key = "prefix+shift+t"` would silently shadow upstream's default
 `rename_tab`.
 
-known gaps: clicks do not select rows (a press only closes). No scrollbar,
+known gaps: a draft whose t3t quits without a thread stays a draft row
+until its workspace is closed. A project thread never joins an existing
+workspace. The project list is refetched on stamps only, so a new t3
+project shows once any session changes. Clicks do not select rows (a press only closes). No scrollbar,
 no page up/down. No new thread when the ticket list is empty or offline
 with nothing cached. A pane whose draft t3t has not reported a thread is not
 replaced; Enter adds a second pane next to it.
@@ -761,6 +796,11 @@ only t13 under `parked`, Enter created workspace `t13` with the draft t3t in
 its new dir; picker on t13 again offers `new thread pane in t13` (label
 fallback); stub down → `offline`, rows kept. Not verified: a remote thread
 machine (covered by a unit test only), the real tkd and t3t.
+
+Projects and drafts (2026-11-17): unit tests only (`cargo nextest run
+--locked tickets threads`, 60 pass; the server test checks the token is set
+on create and cleared by the first resume report). Not run against the
+real tkd, t3t or devvm yet.
 
 ---
 
